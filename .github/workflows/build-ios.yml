@@ -18,7 +18,9 @@ jobs:
           node-version: '24'
 
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: |
+          npm install --legacy-peer-deps
+          npm install terser --no-save
 
       - name: Create .env file for build
         run: |
