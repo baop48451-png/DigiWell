@@ -252,6 +252,7 @@ ${buildContextSummary(context)}
 
 Tin nhắn người dùng: "${input}"`;
 
+    // @ts-ignore - Bỏ qua cảnh báo kiểu dữ liệu của Gemini Tool
     const tools = [{
       functionDeclarations: [{
         name: 'recordWaterIntake',

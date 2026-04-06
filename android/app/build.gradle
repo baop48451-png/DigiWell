@@ -5,7 +5,7 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
         applicationId "com.vlu.digiwell"
-        minSdkVersion rootProject.ext.minSdkVersion
+        minSdkVersion rootProject.ext.has('minSdkVersion') ? rootProject.ext.get('minSdkVersion') : 26
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0.0"

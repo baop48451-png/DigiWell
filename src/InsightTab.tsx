@@ -1,3 +1,4 @@
+// Đã xóa import React thừa để chống lỗi build
 import { BarChart2, Lock, Cpu, RefreshCw } from 'lucide-react';
 
 interface InsightTabProps {

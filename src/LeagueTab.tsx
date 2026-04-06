@@ -1,3 +1,4 @@
+// Đã xóa import React thừa để chống lỗi build
 import { Trophy, UserPlus, Zap, Crown, Medal } from 'lucide-react';
 
 interface LeagueTabProps {
