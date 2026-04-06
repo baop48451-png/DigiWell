@@ -1164,6 +1164,7 @@ ${historyText}`;
         }]
       }] as any;
 
+      let lastErr: any = null;
       for (const modelName of modelsToTry) {
         try {
           let currentConversation = [...conversation];
@@ -1234,13 +1235,22 @@ ${historyText}`;
             }
           }
           if (advice) break;
-        } catch (err) {}
+        } catch (err: any) {
+          lastErr = err;
+        }
       }
-      if (!advice) throw new Error("Không nhận được phản hồi");
+      if (!advice) throw lastErr || new Error("Không nhận được phản hồi từ hệ thống AI");
 
       setChatMessages(prev => [...prev, { role: 'assistant', content: advice }]);
     } catch (err: any) {
-      setChatMessages(prev => [...prev, { role: 'assistant', content: "Xin lỗi, hiện tại hệ thống AI đang quá tải. Vui lòng thử lại sau!" }]);
+      console.error("Lỗi Chat AI:", err);
+      const errMsg = err.message || "Lỗi không xác định";
+      setChatMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: errMsg.includes('quota') || errMsg.includes('429') 
+          ? "Xin lỗi, API Key của bạn đang hết hạn mức (Quota). Vui lòng kiểm tra lại Google AI Studio nhé!" 
+          : `Hệ thống AI gặp lỗi: ${errMsg}. Xin vui lòng thử lại sau!` 
+      }]);
     } finally {
       setIsChatLoading(false);
     }
@@ -1363,6 +1373,8 @@ ${historyText}`;
   const saveEntries = (entries: LocalWaterEntry[]) => {
     if (!profile?.id) return;
     saveStoredWaterEntries(profile.id, entries, getTodayWaterDay());
+      // FIX BUG: Lưu thêm một bản backup trực tiếp để không bị mất khi đóng app
+      localStorage.setItem(`digiwell_history_backup_${profile.id}_${getTodayWaterDay()}`, JSON.stringify(entries));
   };
 
   const readPendingHydrationActions = (): PendingHydrationAction[] => {
@@ -1388,8 +1400,20 @@ ${historyText}`;
     if (!profile?.id) return;
 
     const todayStr = getTodayWaterDay();
-    const localEntries = loadStoredWaterEntries(profile.id, todayStr);
-    const localTotal = calculateWaterTotal(localEntries);
+      let localEntries = loadStoredWaterEntries(profile.id, todayStr);
+      
+      // FIX BUG: Phục hồi từ bản backup nếu hàm load mặc định bị rỗng
+      const backupData = localStorage.getItem(`digiwell_history_backup_${profile.id}_${todayStr}`);
+      if (backupData) {
+        try {
+          const parsed = JSON.parse(backupData);
+          if (parsed && parsed.length > 0) {
+             localEntries = parsed;
+          }
+        } catch (e) {}
+      }
+
+      const localTotal = localEntries.reduce((sum: number, e: any) => sum + (e.actual_ml || e.amount), 0);
     const pendingSync = getPendingWaterSync(profile.id, todayStr);
 
     waterEntriesRef.current = localEntries;
@@ -1801,7 +1825,12 @@ ${historyText}`;
       } catch (err: any) {
         toast.error("Không thể lấy thời tiết: " + err.message);
       }
-    }, () => toast.error("Vui lòng cấp quyền vị trí để xem thời tiết!"));
+    }, (error) => {
+      console.error("Lỗi GPS:", error);
+      toast.error("Không lấy được vị trí (bị từ chối quyền trên App). Đang dùng dữ liệu giả lập!");
+      setWeatherData({ temp: 34, location: 'Khu vực của bạn', status: 'Nắng gắt (Mock)' });
+      setIsWeatherSynced(true);
+    }, { timeout: 10000 });
   };
 
   const syncCalendar = async () => {
@@ -1816,6 +1845,14 @@ ${historyText}`;
         if (confirm("Bạn chưa kết nối tài khoản Google. Bạn có muốn kết nối ngay để đồng bộ lịch không?")) {
           const tid = toast.loading("Đang chuyển trang... Vui lòng đăng nhập Google để cấp quyền đọc Lịch nhé!");
           
+          // FIX BUG: Tránh kẹt màn hình loading do Apple chặn WebView đăng nhập Google
+          if (Capacitor.isNativePlatform()) {
+            toast.dismiss(tid);
+            toast.error("Bảo mật của Apple/Google chặn đăng nhập web trong App. Đang dùng dữ liệu giả lập!");
+            setIsCalendarSynced(true);
+            return;
+          }
+
           setTimeout(async () => {
             try {
               // Thử dùng tính năng liên kết tài khoản của Supabase
@@ -1824,12 +1861,14 @@ ${historyText}`;
                   provider: 'google',
                   options: { scopes: 'https://www.googleapis.com/auth/calendar.readonly', redirectTo: window.location.origin }
                 });
+                toast.dismiss(tid);
                 if (error) throw error;
               } else {
                 const { error } = await supabase!.auth.signInWithOAuth({
                   provider: 'google',
                   options: { scopes: 'https://www.googleapis.com/auth/calendar.readonly', redirectTo: window.location.origin }
                 });
+                toast.dismiss(tid);
                 if (error) throw error;
               }
             } catch (err: any) {
