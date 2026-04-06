@@ -1162,7 +1162,7 @@ ${historyText}`;
             required: ['action']
           }
         }]
-      }];
+      }] as any;
 
       for (const modelName of modelsToTry) {
         try {

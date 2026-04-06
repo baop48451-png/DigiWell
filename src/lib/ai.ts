@@ -275,7 +275,7 @@ Tin nhắn người dùng: "${input}"`;
           required: ['amount', 'factor', 'name'],
         },
       }],
-    }];
+    }] as any;
 
     const ai = createGeminiClient();
     const modelsToTry = await getGenerateContentModels(ai);
