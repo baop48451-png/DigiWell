@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DigiWell</string>
+    <string name="title_activity_main">DigiWell</string>
+    <string name="package_name">com.vlu.digiwell</string>
+    <string name="custom_url_scheme">com.vlu.digiwell</string>
+</resources>
