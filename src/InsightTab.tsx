@@ -1,4 +1,3 @@
-import React from 'react';
 import { BarChart2, Lock, Cpu, RefreshCw } from 'lucide-react';
 
 interface InsightTabProps {

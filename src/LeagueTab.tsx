@@ -1,4 +1,3 @@
-import React from 'react';
 import { Trophy, UserPlus, Zap, Crown, Medal } from 'lucide-react';
 
 interface LeagueTabProps {
