@@ -69,26 +69,46 @@ async function getGenerateContentModels(ai: GoogleGenAI) {
   return PREFERRED_MODELS;
 }
 
-function getGeminiErrorMessage(error: unknown) {
+function getGeminiErrorMessage(error: unknown): string {
   const rawMessage = error instanceof Error ? error.message : String(error);
+
+  // API key bị leak hoặc bị disable
+  if (
+    rawMessage.includes('API key was reported as leaked') ||
+    rawMessage.includes('PERMISSION_DENIED') ||
+    rawMessage.includes('API_KEY_INVALID') ||
+    rawMessage.includes('status":"PERMISSION_DENIED"')
+  ) {
+    return 'API Key đã bị vô hiệu hóa (có thể bị leak). Hãy tạo API Key mới tại https://aistudio.google.com/apikey';
+  }
 
   if (
     rawMessage.includes('NOT_FOUND') &&
     rawMessage.toLowerCase().includes('models/')
   ) {
-    return 'Model Gemini cũ không còn hỗ trợ cho generateContent nữa.';
+    return 'Model Gemini cũ không còn hỗ trợ. Hãy thử API Key mới.';
   }
 
   if (
     rawMessage.includes('RESOURCE_EXHAUSTED') ||
     rawMessage.includes('"code":429') ||
-    rawMessage.toLowerCase().includes('quota exceeded')
+    rawMessage.toLowerCase().includes('quota exceeded') ||
+    rawMessage.includes('quota')
   ) {
-    return 'Gemini API đang hết quota hoặc project Google AI Studio chưa bật billing.';
+    return 'Gemini API đã hết quota. Hãy tạo API Key mới hoặc bật billing tại https://aistudio.google.com/apikey';
   }
 
   if (rawMessage.includes('Chưa cấu hình VITE_GEMINI_API_KEY')) {
-    return 'Bạn chưa cấu hình VITE_GEMINI_API_KEY cho DigiWell.';
+    return 'Chưa có API Key. Hãy tạo tại https://aistudio.google.com/apikey và thêm vào file .env';
+  }
+
+  // Lỗi network
+  if (
+    rawMessage.includes('fetch') ||
+    rawMessage.includes('network') ||
+    rawMessage.includes('ECONNREFUSED')
+  ) {
+    return 'Lỗi kết nối mạng. Hãy kiểm tra internet và thử lại.';
   }
 
   return rawMessage;
@@ -239,18 +259,23 @@ export async function sendAiChatMessage(
   context: DigiwellAiContext,
 ): Promise<{ reply: string; waterAction?: { amount: number; factor: number; name: string } }> {
   try {
-    const prompt = `Bạn là trợ lý ảo AI của DigiWell.
-Nhiệm vụ:
-- Trả lời bằng tiếng Việt, ngắn gọn, thân thiện, hữu ích, tối đa 50 từ.
-- Ưu tiên chủ đề uống nước, nghỉ ngơi, thói quen sinh hoạt, hydration coaching.
-- Nếu người dùng nói rằng họ vừa uống một loại nước/đồ uống hoặc muốn ghi nhận lượng nước, hãy gọi function recordWaterIntake.
-- Nếu chưa đủ chắc chắn về dung tích, hãy ước lượng hợp lý theo ngữ cảnh.
-- Không dùng markdown phức tạp.
+    const prompt = `Bạn là "DigiCoach" - trợ lý sức khỏe AI thân thiện của app DigiWell.
+Tên người dùng: ${context.profile?.nickname || 'Bạn'}
+Thời gian: ${new Date(context.nowIso).toLocaleTimeString('vi-VN')}
 
-Bối cảnh người dùng:
-${buildContextSummary(context)}
+QUY TẮC BẮT BUỘC:
+1. Xưng hô "Mình", gọi người dùng là "${context.profile?.nickname || 'Bạn'}"
+2. Trả lời cực kỳ ngắn gọn như tin nhắn người thật, kèm emoji phù hợp
+3. Nếu người dùng nói uống nước/sữa/trà/cà phê/bia..., BẮT BUỘC gọi function recordWaterIntake
+4. Nếu người dùng nói xóa/sửa, gọi function deleteLastWaterIntake (nếu có)
+5. Tuyệt đối không tự ý cộng trừ nhân chia trong đầu
 
-Tin nhắn người dùng: "${input}"`;
+Bối cảnh:
+- Đã uống: ${context.waterIntake}/${context.waterGoal}ml (Còn thiếu ${Math.max(context.waterGoal - context.waterIntake, 0)}ml)
+${context.weather ? `- Thời tiết: ${context.weather.temp}°C, ${context.weather.status}` : ''}
+${context.watch ? `- Vận động: ${context.watch.steps} bước, ${context.watch.heartRate} BPM` : ''}
+
+Tin nhắn: "${input}"`;
 
     // @ts-ignore - Bỏ qua cảnh báo kiểu dữ liệu của Gemini Tool
     const tools = [{
@@ -329,10 +354,18 @@ Tin nhắn người dùng: "${input}"`;
     throw lastError || new Error('Không nhận được phản hồi');
   } catch (error) {
     const message = getGeminiErrorMessage(error);
+    if (message.includes('API Key') || message.includes('leak') || message.includes('vô hiệu hóa')) {
+      return {
+        reply: `⚠️ ${message}. Vui lòng tạo API Key mới tại https://aistudio.google.com/apikey`,
+      };
+    }
+    if (message.includes('hết quota') || message.includes('quota')) {
+      return {
+        reply: '⚠️ Gemini API đã hết quota. Hãy tạo API Key mới hoặc bật billing nhé!',
+      };
+    }
     return {
-      reply: message.includes('hết quota')
-        ? 'Xin lỗi, Gemini đang hết quota nên chưa phản hồi được. Bạn vẫn nên uống nước đều mỗi 30-60 phút nhé!'
-        : 'Xin lỗi, hiện tại hệ thống AI đang quá tải. Vui lòng thử lại sau!',
+      reply: '⚠️ Xin lỗi, hệ thống AI đang gặp sự cố. Vui lòng thử lại sau!',
     };
   }
 }

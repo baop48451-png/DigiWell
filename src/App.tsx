@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
+import confetti from 'canvas-confetti';
 import { 
   Droplet, Eye, ShieldCheck, Activity, Coffee, Dumbbell, 
   MonitorPlay, User, 
@@ -28,7 +29,6 @@ import {
   type HydrationReminderSettings,
 } from './lib/hydrationReminders';
 import {
-  calculateWaterTotal,
   clearPendingWaterSync,
   getPendingWaterSync,
   getTodayWaterDay,
@@ -58,6 +58,7 @@ import LoginScreen from './LoginScreen';
 import RegisterScreen from './RegisterScreen';
 import InsightTab from './InsightTab';
 import LeagueTab from './LeagueTab';
+import CommentsSection from './CommentsSection';
 
 // ============================================================================
 // DIGIWELL SMART WELLNESS - PREMIUM DARK UI (V7 FIXED)
@@ -174,6 +175,7 @@ function AppContent() {
   const [socialComposer, setSocialComposer] = useState<SocialComposerState>({ ...DEFAULT_SOCIAL_COMPOSER });
   const [socialPosts, setSocialPosts] = useState<SocialFeedPost[]>([]);
   const [socialStories, setSocialStories] = useState<SocialFeedPost[]>([]);
+  const [expandedPostId, setExpandedPostId] = useState<string | null>(null);
   const [socialSearchQuery, setSocialSearchQuery] = useState('');
   const [socialSearchResults, setSocialSearchResults] = useState<SocialDiscoverProfile[]>([]);
   const [socialFollowingIds, setSocialFollowingIds] = useState<string[]>([]);
@@ -1101,8 +1103,9 @@ Chỉ số sức khỏe hiện tại của người dùng:
 ${historyText}`;
       };
 
-      // Đưa toàn bộ lịch sử chat vào để AI nhớ ngữ cảnh
-      const conversation: any[] = chatMessages.map(msg => ({
+      // Giới hạn lịch sử chat (chỉ lấy 10 tin nhắn gần nhất) để tiết kiệm Token AI
+      const recentMessages = chatMessages.slice(-10);
+      const conversation: any[] = recentMessages.map(msg => ({
         role: msg.role === 'assistant' ? 'model' : 'user', // API Gemini dùng 'model' thay vì 'assistant'
         parts: [{ text: msg.content }]
       }));
@@ -1449,6 +1452,12 @@ ${historyText}`;
     const entry = { id: Date.now().toString(), amount, actual_ml: actualHydration, name, timestamp: Date.now() };
     const newEntries = [...waterEntriesRef.current, entry];
     const newTotal = Math.max(0, waterIntakeRef.current + actualHydration); // Không để tổng bị âm
+    
+    // Check nếu vừa đạt 100% -> trigger confetti
+    const wasUnderGoal = waterIntakeRef.current < waterGoal;
+    const isNowAtGoal = newTotal >= waterGoal;
+    const justReachedGoal = wasUnderGoal && isNowAtGoal;
+    
     waterEntriesRef.current = newEntries;
     waterIntakeRef.current = newTotal;
     setWaterEntries(newEntries);
@@ -1459,6 +1468,19 @@ ${historyText}`;
       toast.error(`Đã uống ${name}. Mất ${Math.abs(actualHydration)}ml lượng nước cơ thể! 📉`);
     } else {
       toast.success(`+${actualHydration}ml (${name})! Đã lưu vào nhật ký hôm nay.`);
+      
+      // Confetti celebration khi vừa đạt 100% mục tiêu
+      if (justReachedGoal && factor > 0) {
+        setTimeout(() => {
+          confetti({
+            particleCount: 150,
+            spread: 80,
+            origin: { y: 0.6 },
+            colors: ['#06b6d4', '#0ea5e9', '#22d3ee', '#34d399', '#fbbf24'],
+          });
+          toast.success('🎉 Chúc mừng! Bạn đã hoàn thành mục tiêu nước hôm nay!');
+        }, 300);
+      }
     }
     await syncTotalToCloud(newTotal);
   };
@@ -1794,7 +1816,7 @@ ${historyText}`;
     navigator.geolocation.getCurrentPosition(async (position) => {
       try {
         const { latitude, longitude } = position.coords;
-        const apiKey = import.meta.env.VITE_WEATHER_API_KEY || '9bc63ef84a50831427890f388bf72ffa';
+        const apiKey = import.meta.env.VITE_WEATHER_API_KEY;
         
         if (!apiKey) {
           toast.warning("Chưa có API Key, dùng dữ liệu giả lập!");
@@ -2235,6 +2257,8 @@ ${historyText}`;
             aiAdvice={aiAdvice}
             fetchAIAdvice={fetchAIAdvice}
             setShowAiChat={setShowAiChat}
+            profileId={profile?.id}
+            waterGoal={waterGoal}
           />
         )}
 
@@ -2395,15 +2419,21 @@ ${historyText}`;
                       )}
                     </div>
 
-                    <div className="mt-4 grid grid-cols-2 gap-2">
+                    <div className="mt-4 grid grid-cols-3 gap-2">
                       <button onClick={() => handleToggleLikePost(post)} className={`py-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all ${post.likedByMe ? 'bg-rose-500/15 text-rose-300 border-rose-500/30' : 'bg-slate-900/70 text-slate-300 border-slate-700'}`}>
                         <Heart size={14} className={post.likedByMe ? 'fill-rose-400' : ''} />
                         {post.like_count || 0} thích
                       </button>
+                      <button onClick={() => setExpandedPostId(expandedPostId === post.id ? null : post.id)} className={`py-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all ${expandedPostId === post.id ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' : 'bg-slate-900/70 text-slate-300 border-slate-700'}`}>
+                        💬
+                      </button>
                       <button onClick={() => openSocialComposer('progress')} className="py-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all">
-                        <Share2 size={14} /> Đăng kiểu này
+                        <Share2 size={14} />
                       </button>
                     </div>
+                    {expandedPostId === post.id && profile?.id && (
+                      <CommentsSection postId={post.id} currentUserId={profile.id} />
+                    )}
                   </div>
                 </div>
               </div>

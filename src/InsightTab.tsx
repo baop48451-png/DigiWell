@@ -1,5 +1,6 @@
-// Đã xóa import React thừa để chống lỗi build
-import { BarChart2, Lock, Cpu, RefreshCw } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { BarChart2, Lock, Cpu, RefreshCw, Calendar, ChevronLeft, ChevronRight, Droplet } from 'lucide-react';
+import { loadMonthlyWaterHistory, type DailyWaterSummary } from './lib/waterStorage';
 
 interface InsightTabProps {
   isPremium: boolean;
@@ -12,14 +13,98 @@ interface InsightTabProps {
   aiAdvice: string;
   fetchAIAdvice: () => void;
   setShowAiChat: (show: boolean) => void;
+  profileId?: string;
+  waterGoal: number;
 }
 
 const card = "bg-slate-800/60 backdrop-blur-sm border border-slate-700/50 rounded-2xl";
 
 export default function InsightTab({
   isPremium, setShowPremiumModal, isExportingPDF, handleExportPDF,
-  waterIntake, progress, isAiLoading, aiAdvice, fetchAIAdvice, setShowAiChat
+  progress, isAiLoading, aiAdvice, fetchAIAdvice, setShowAiChat,
+  profileId, waterGoal
 }: InsightTabProps) {
+  const [monthlyHistory, setMonthlyHistory] = useState<DailyWaterSummary[]>([]);
+  const [historyMonth, setHistoryMonth] = useState(new Date());
+  const [selectedDay, setSelectedDay] = useState<DailyWaterSummary | null>(null);
+
+  useEffect(() => {
+    if (profileId) {
+      const history = loadMonthlyWaterHistory(profileId);
+      const updated = history.map(h => ({
+        ...h,
+        goalMl: waterGoal,
+        percentage: waterGoal > 0 ? Math.min((h.totalMl / waterGoal) * 100, 100) : 0,
+      }));
+      setMonthlyHistory(updated);
+    }
+  }, [profileId, waterGoal]);
+
+  const getDaysInMonth = (date: Date): DailyWaterSummary[] => {
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const days: DailyWaterSummary[] = [];
+    
+    const startDayOfWeek = firstDay.getDay();
+    
+    if (startDayOfWeek > 0) {
+      const prevMonth = new Date(year, month, 0);
+      for (let i = startDayOfWeek - 1; i >= 0; i--) {
+        const d = new Date(year, month - 1, prevMonth.getDate() - i);
+        const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        const existing = monthlyHistory.find(h => h.day === day);
+        days.push(existing || { day, date: d, totalMl: 0, goalMl: waterGoal, entryCount: 0, percentage: 0 });
+      }
+    }
+    
+    for (let i = 1; i <= lastDay.getDate(); i++) {
+      const d = new Date(year, month, i);
+      const day = `${year}-${String(month + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
+      const existing = monthlyHistory.find(h => h.day === day);
+      days.push(existing || { day, date: d, totalMl: 0, goalMl: waterGoal, entryCount: 0, percentage: 0 });
+    }
+    
+    const remaining = 42 - days.length;
+    for (let i = 1; i <= remaining; i++) {
+      const d = new Date(year, month + 1, i);
+      const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const existing = monthlyHistory.find(h => h.day === day);
+      days.push(existing || { day, date: d, totalMl: 0, goalMl: waterGoal, entryCount: 0, percentage: 0 });
+    }
+    
+    return days;
+  };
+
+  const monthDays = getDaysInMonth(historyMonth);
+  const monthName = historyMonth.toLocaleDateString('vi-VN', { month: 'long', year: 'numeric' });
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+  const prevMonth = () => setHistoryMonth(new Date(historyMonth.getFullYear(), historyMonth.getMonth() - 1, 1));
+  const nextMonth = () => setHistoryMonth(new Date(historyMonth.getFullYear(), historyMonth.getMonth() + 1, 1));
+
+  const weekDays = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
+  const recent7Days = monthlyHistory.slice(0, 7);
+  const avgMl = recent7Days.length > 0 ? Math.round(recent7Days.reduce((sum, d) => sum + d.totalMl, 0) / recent7Days.length) : 0;
+  const completedDays = monthlyHistory.filter(d => d.percentage >= 100).length;
+  const bestDay = monthlyHistory.reduce<{ totalMl: number; day: string }>((best, d) => d.totalMl > best.totalMl ? d : best, { totalMl: 0, day: '' });
+
+  const getDayColor = (day: DailyWaterSummary, isCurrentMonth: boolean) => {
+    if (!isCurrentMonth) return 'bg-slate-800/30 text-slate-600';
+    if (day.day === todayStr) return 'ring-2 ring-cyan-400 bg-cyan-500/30 text-white';
+    if (day.totalMl === 0) return 'bg-slate-800/50 text-slate-400';
+    if (day.percentage >= 100) return 'bg-emerald-500/60 text-white';
+    if (day.percentage >= 70) return 'bg-cyan-500/50 text-white';
+    if (day.percentage >= 40) return 'bg-yellow-500/40 text-white';
+    return 'bg-red-500/40 text-white';
+  };
+
+  const isCurrentMonthDay = (day: DailyWaterSummary) => {
+    return day.date.getMonth() === historyMonth.getMonth() && day.date.getFullYear() === historyMonth.getFullYear();
+  };
+
   return (
     <div className="space-y-4 animate-in slide-in-from-right duration-300">
       <div className="flex justify-between items-center mb-4">
@@ -38,30 +123,126 @@ export default function InsightTab({
           <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">7 ngày gần nhất</p>
         </div>
         <div className="flex items-end justify-between gap-2 h-44">
-          {[
-            { d: 'T3', ml: 2500, pct: 70 }, { d: 'T4', ml: 2800, pct: 80 }, { d: 'T5', ml: 1500, pct: 40 },
-            { d: 'T6', ml: 3000, pct: 90 }, { d: 'T7', ml: 3200, pct: 95 }, { d: 'CN', ml: 2100, pct: 60 },
-            { d: 'HN', ml: waterIntake, pct: Math.max((waterIntake / 3500) * 100, 5), isToday: true }
-          ].map(item => (
-            <div key={item.d} className="flex-1 flex flex-col items-center gap-2">
-              <span className="text-[10px] font-bold" style={{ color: (item as any).isToday ? '#22d3ee' : '#64748b' }}>
-                {item.ml > 0 ? `${(item.ml / 1000).toFixed(1)}L` : '0L'}
+          {recent7Days.map((item) => (
+            <div key={item.day} className="flex-1 flex flex-col items-center gap-2">
+              <span className="text-[10px] font-bold" style={{ color: item.day === todayStr ? '#22d3ee' : '#64748b' }}>
+                {item.totalMl > 0 ? `${(item.totalMl / 1000).toFixed(1)}L` : '0L'}
               </span>
-              <div className="w-full rounded-xl relative overflow-hidden bg-slate-800 border border-slate-700" style={{ height: '120px', boxShadow: (item as any).isToday ? '0 0 15px rgba(6,182,212,0.3)' : 'none' }}>
+              <div className="w-full rounded-xl relative overflow-hidden bg-slate-800 border border-slate-700" style={{ height: '120px', boxShadow: item.day === todayStr ? '0 0 15px rgba(6,182,212,0.3)' : 'none' }}>
                 <div className="absolute bottom-0 w-full rounded-xl transition-all duration-700"
-                  style={{ height: `${item.pct}%`, background: (item as any).isToday ? 'linear-gradient(180deg, #06b6d4, #0ea5e9)' : 'rgba(6,182,212,0.2)' }} />
+                  style={{ height: `${Math.max(item.percentage, item.day === todayStr ? 5 : 0)}%`, background: item.day === todayStr ? 'linear-gradient(180deg, #06b6d4, #0ea5e9)' : 'rgba(6,182,212,0.2)' }} />
               </div>
-              <span className="text-[10px] font-bold" style={{ color: (item as any).isToday ? '#22d3ee' : '#64748b' }}>{item.d}</span>
+              <span className="text-[10px] font-bold" style={{ color: item.day === todayStr ? '#22d3ee' : '#64748b' }}>
+                {item.date.toLocaleDateString('vi-VN', { weekday: 'short' }).replace('/', '')}
+              </span>
             </div>
           ))}
         </div>
       </div>
 
+      <div className={`${card} p-5`}>
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Calendar size={16} className="text-cyan-400" />
+            <p className="text-white text-sm font-bold uppercase tracking-widest">Lịch sử uống nước</p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between mb-4">
+          <button onClick={prevMonth} className="w-8 h-8 rounded-lg bg-slate-700/50 flex items-center justify-center text-slate-400 hover:text-white active:scale-95 transition-all">
+            <ChevronLeft size={16} />
+          </button>
+          <p className="text-white font-bold">{monthName}</p>
+          <button onClick={nextMonth} className="w-8 h-8 rounded-lg bg-slate-700/50 flex items-center justify-center text-slate-400 hover:text-white active:scale-95 transition-all">
+            <ChevronRight size={16} />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-7 gap-1 mb-2">
+          {weekDays.map(d => (
+            <div key={d} className="text-center text-[10px] font-bold text-slate-500 py-1">{d}</div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-7 gap-1">
+          {monthDays.map((day, idx) => (
+            <button
+              key={idx}
+              onClick={() => day.entryCount > 0 && setSelectedDay(day)}
+              className={`aspect-square rounded-lg flex flex-col items-center justify-center text-xs font-bold transition-all ${getDayColor(day, isCurrentMonthDay(day))} ${day.entryCount > 0 ? 'cursor-pointer hover:scale-105' : 'cursor-default'}`}
+            >
+              <span>{day.date.getDate()}</span>
+              {day.totalMl > 0 && (
+                <span className="text-[8px] opacity-70">{Math.round(day.percentage)}%</span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-center gap-4 mt-4 pt-4 border-t border-slate-700/50">
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 rounded bg-red-500/40" />
+              <span className="text-[10px] text-slate-500">{"<40%"}</span>
+            </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-yellow-500/40" />
+            <span className="text-[10px] text-slate-500">40-70%</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-cyan-500/50" />
+            <span className="text-[10px] text-slate-500">70-99%</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-emerald-500/60" />
+            <span className="text-[10px] text-slate-500">100%+</span>
+          </div>
+        </div>
+
+        {selectedDay && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }} onClick={() => setSelectedDay(null)}>
+            <div className="w-full max-w-sm rounded-3xl p-6" style={{ background: '#1e293b', border: '1px solid rgba(6,182,212,0.2)' }} onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <p className="text-cyan-400 text-[10px] font-bold uppercase tracking-widest">Chi tiết</p>
+                  <h3 className="text-xl font-black text-white mt-1">
+                    {selectedDay.date.toLocaleDateString('vi-VN', { weekday: 'long', day: 'numeric', month: 'long' })}
+                  </h3>
+                </div>
+                <button onClick={() => setSelectedDay(null)} className="text-slate-400 text-xs bg-slate-700 px-3 py-1.5 rounded-lg font-bold">Đóng</button>
+              </div>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-4 rounded-xl bg-slate-900/80 border border-slate-700">
+                  <div className="flex items-center gap-3">
+                    <Droplet size={20} className="text-cyan-400" />
+                    <span className="text-white text-sm font-bold">Tổng lượng nước</span>
+                  </div>
+                  <span className="text-cyan-400 font-black text-lg">{selectedDay.totalMl} ml</span>
+                </div>
+                <div className="flex items-center justify-between p-4 rounded-xl bg-slate-900/80 border border-slate-700">
+                  <div className="flex items-center gap-3">
+                    <BarChart2 size={20} className="text-emerald-400" />
+                    <span className="text-white text-sm font-bold">Hoàn thành</span>
+                  </div>
+                  <span className="text-emerald-400 font-black text-lg">{Math.round(selectedDay.percentage)}%</span>
+                </div>
+                <div className="flex items-center justify-between p-4 rounded-xl bg-slate-900/80 border border-slate-700">
+                  <div className="flex items-center gap-3">
+                    <Cpu size={20} className="text-amber-400" />
+                    <span className="text-white text-sm font-bold">Số lần uống</span>
+                  </div>
+                  <span className="text-amber-400 font-black text-lg">{selectedDay.entryCount} lần</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="grid grid-cols-2 gap-4">
         {[
-          { label: 'Trung bình/ngày', val: '2,457', unit: 'ml', color: '#22d3ee' },
-          { label: 'Hoàn thành mục tiêu', val: '4', unit: '/ 7 ngày', color: '#34d399' },
-          { label: 'Chuỗi liên tiếp', val: '3', unit: 'ngày', color: '#fbbf24' },
+          { label: 'Trung bình/ngày', val: avgMl > 0 ? avgMl.toLocaleString() : '--', unit: 'ml', color: '#22d3ee' },
+          { label: 'Hoàn thành mục tiêu', val: completedDays.toString(), unit: `/ ${Math.min(monthlyHistory.length, 30)} ngày`, color: '#34d399' },
+          { label: 'Ngày tốt nhất', val: bestDay.totalMl > 0 ? `${(bestDay.totalMl / 1000).toFixed(1)}L` : '--', unit: bestDay.day || '', color: '#fbbf24' },
           { label: 'Tiến độ hôm nay', val: `${Math.round(progress)}`, unit: '%', color: '#a78bfa' },
         ].map(s => (
           <div key={s.label} className={`${card} p-5`}>
@@ -93,9 +274,7 @@ export default function InsightTab({
         </div>
         <p className="text-slate-300 text-sm leading-relaxed">
           {isPremium ? 
-            (isAiLoading
-              ? 'Gemini đang phân tích dữ liệu của bạn...'
-              : aiAdvice || 'Nhấn làm mới để nhận gợi ý cá nhân hóa từ Gemini.')
+            (isAiLoading ? 'Gemini đang phân tích dữ liệu của bạn...' : aiAdvice || 'Nhấn làm mới để nhận gợi ý cá nhân hóa từ Gemini.')
             : 'Gemini AI Coach nằm trong gói Pro với gợi ý cá nhân hóa theo lượng nước, thời tiết, lịch và hoạt động.'}
         </p>
       </div>
