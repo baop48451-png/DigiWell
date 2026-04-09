@@ -1,12 +1,13 @@
 import React from 'react';
 import { Droplet, Cpu } from 'lucide-react';
+import type { LocalWaterEntry } from '../types';
 
 interface HistoryModalProps {
   showHistory: boolean;
   setShowHistory: (show: boolean) => void;
-  waterEntries: any[];
+  waterEntries: LocalWaterEntry[];
   waterIntake: number;
-  setEditingEntry: (entry: any | null) => void;
+  setEditingEntry: (entry: LocalWaterEntry | null) => void;
   setEditAmount: (amount: string) => void;
   handleDeleteEntry: (id: string) => Promise<void>;
 }

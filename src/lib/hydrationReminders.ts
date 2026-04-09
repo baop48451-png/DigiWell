@@ -224,6 +224,18 @@ export const scheduleHydrationReminders = async (
     extra: { source: 'hydration-reminder' },
   }));
 
+  notifications.push({
+    id: REMINDER_ID_BASE + 99,
+    title: 'Tuần qua bạn uống nước thế nào? 📊',
+    body: 'Ghé xem ngay thống kê tuần và nhận huy hiệu mới nhé!',
+    schedule: {
+      on: { weekday: 1 /* Sun */, hour: 20, minute: 0 },
+      allowWhileIdle: true,
+    },
+    channelId: REMINDER_CHANNEL_ID,
+    autoCancel: true,
+  });
+
   await registerHydrationReminderActions();
   await LocalNotifications.schedule({ notifications });
   return { scheduled: true, count: notifications.length };

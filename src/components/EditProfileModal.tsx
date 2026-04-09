@@ -1,10 +1,11 @@
 import React from 'react';
+import type { UserProfile } from '../types';
 
 interface EditProfileModalProps {
   showEditProfile: boolean;
   setShowEditProfile: (show: boolean) => void;
-  editProfileData: any;
-  setEditProfileData: (data: any) => void;
+  editProfileData: UserProfile;
+  setEditProfileData: (data: UserProfile) => void;
   handleSaveProfile: (e: React.FormEvent) => void;
   isUpdatingProfile: boolean;
 }

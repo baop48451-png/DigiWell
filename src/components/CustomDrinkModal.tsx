@@ -1,11 +1,17 @@
 import React from 'react';
 import { toast } from 'sonner';
 
+interface CustomDrinkForm {
+  name: string;
+  amount: number | string;
+  factor: number;
+}
+
 interface CustomDrinkModalProps {
   showCustomDrink: boolean;
   setShowCustomDrink: (show: boolean) => void;
-  customDrinkForm: { name: string; amount: number | string; factor: number };
-  setCustomDrinkForm: (form: any) => void;
+  customDrinkForm: CustomDrinkForm;
+  setCustomDrinkForm: (form: CustomDrinkForm) => void;
   handleAddWater: (amount: number, factor: number, name: string) => void;
 }
 

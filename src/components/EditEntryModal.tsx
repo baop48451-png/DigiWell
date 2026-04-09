@@ -1,8 +1,9 @@
 import React from 'react';
+import type { LocalWaterEntry } from '../types';
 
 interface EditEntryModalProps {
-  editingEntry: any;
-  setEditingEntry: (entry: any) => void;
+  editingEntry: LocalWaterEntry | null;
+  setEditingEntry: (entry: LocalWaterEntry | null) => void;
   editAmount: string;
   setEditAmount: (amount: string) => void;
   handleEditEntry: () => void;

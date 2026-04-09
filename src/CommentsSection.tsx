@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Heart, Trash2, RefreshCw } from 'lucide-react';
 import { fetchComments, addComment, toggleCommentLike, type SocialComment } from './lib/socialEnhanced';
+import { checkContent } from './lib/moderation';
 
 interface CommentsSectionProps {
   postId: string;
@@ -13,10 +14,6 @@ export default function CommentsSection({ postId, currentUserId }: CommentsSecti
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  useEffect(() => {
-    loadComments();
-  }, [postId]);
-
   const loadComments = async () => {
     setIsLoading(true);
     const data = await fetchComments(postId, currentUserId);
@@ -24,9 +21,20 @@ export default function CommentsSection({ postId, currentUserId }: CommentsSecti
     setIsLoading(false);
   };
 
+  useEffect(() => {
+    loadComments();
+  }, [postId, currentUserId]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newComment.trim()) return;
+
+    // ── DigiGuard Layer 1 ──
+    const mod = checkContent(newComment);
+    if (mod.level === 'blocked') {
+      alert(`🛡️ DigiGuard: ${mod.reason}`);
+      return;
+    }
     
     setIsSubmitting(true);
     const result = await addComment(postId, currentUserId, newComment.trim());
@@ -36,6 +44,7 @@ export default function CommentsSection({ postId, currentUserId }: CommentsSecti
     }
     setIsSubmitting(false);
   };
+
 
   const handleLike = async (comment: SocialComment) => {
     await toggleCommentLike(comment.id, currentUserId, comment.likedByMe || false);

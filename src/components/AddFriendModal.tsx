@@ -1,5 +1,6 @@
 import React from 'react';
 import { Search, Users } from 'lucide-react';
+import type { SearchResult } from '../types';
 
 interface AddFriendModalProps {
   showAddFriend: boolean;
@@ -7,10 +8,10 @@ interface AddFriendModalProps {
   searchQuery: string;
   handleSearchUser: (query: string) => void;
   isSearching: boolean;
-  searchResults: any[];
+  searchResults: SearchResult[];
   handleAddFriend: (id: string, name: string) => void;
   setSearchQuery: (query: string) => void;
-  setSearchResults: (results: any[]) => void;
+  setSearchResults: (results: SearchResult[]) => void;
 }
 
 const AddFriendModal: React.FC<AddFriendModalProps> = ({

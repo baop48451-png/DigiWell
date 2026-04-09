@@ -13,6 +13,8 @@ export type DigiwellAiContext = {
   watch?: { heartRate: number; steps: number };
   calendar?: { synced: boolean; nextEventTitle?: string };
   profile?: { nickname?: string; goal?: string; activity?: string; climate?: string };
+  mood?: string;
+  meal?: string;
 };
 
 type WaterAction = {
@@ -143,6 +145,8 @@ function buildContextSummary(context: DigiwellAiContext) {
     context.profile?.goal ? `- Mục tiêu sức khỏe: ${context.profile.goal}` : null,
     context.profile?.activity ? `- Mức vận động: ${context.profile.activity}` : null,
     context.profile?.climate ? `- Môi trường/khí hậu: ${context.profile.climate}` : null,
+    context.mood ? `- Tâm trạng hiện tại: ${context.mood}` : null,
+    context.meal ? `- Vừa ăn món: ${context.meal}` : null,
   ].filter(Boolean).join('\n');
 }
 
@@ -240,6 +244,9 @@ Không dùng markdown, không gạch đầu dòng.
 
 Bối cảnh hiện tại:
 ${buildContextSummary(context)}
+
+${context.mood ? 'Hãy chọn đồ uống phù hợp để vực dậy tinh thần hoặc giải tỏa theo tâm trạng nhé.' : ''}
+${context.meal ? 'Gợi ý ngay đồ uống ghép cặp hoàn hảo cho bữa ăn này.' : ''}
 
 Chỉ trả về duy nhất câu khuyên.`;
 

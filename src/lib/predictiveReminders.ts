@@ -226,7 +226,7 @@ export const generateReminderMessage = (
 // Lấy thời gian reminder tối ưu trong ngày
 export const getOptimalReminderSchedule = (
   pattern: UserHydrationPattern,
-  dailyGoal: number,
+  _dailyGoal: number,
   settings: {
     remindersPerDay: number;
     startHour: number;
