@@ -35,7 +35,7 @@ const PREFERRED_MODELS = [
 
 const FRIENDLY_FALLBACK_ADVICE = 'Hệ thống AI đang bận một chút. Tạm thời hãy uống thêm vài ngụm nước nhỏ và nghỉ 1-2 phút nhé!';
 
-function createGeminiClient() {
+export function createGeminiClient() {
   if (!geminiApiKey) {
     throw new Error('Chưa cấu hình VITE_GEMINI_API_KEY');
   }
@@ -43,7 +43,7 @@ function createGeminiClient() {
   return new GoogleGenAI({ apiKey: geminiApiKey });
 }
 
-async function getGenerateContentModels(ai: GoogleGenAI) {
+export async function getGenerateContentModels(ai: GoogleGenAI) {
   if (availableGeminiModelsCache?.length) return availableGeminiModelsCache;
 
   try {
@@ -69,7 +69,7 @@ async function getGenerateContentModels(ai: GoogleGenAI) {
   return PREFERRED_MODELS;
 }
 
-function getGeminiErrorMessage(error: unknown): string {
+export function getGeminiErrorMessage(error: unknown): string {
   const rawMessage = error instanceof Error ? error.message : String(error);
 
   // API key bị leak hoặc bị disable

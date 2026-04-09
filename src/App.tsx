@@ -1,18 +1,19 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import confetti from 'canvas-confetti';
 import { 
   Droplet, Eye, ShieldCheck, Activity, Coffee, Dumbbell, 
   MonitorPlay, User, 
   Lock, Home, BarChart2, Trophy, Rss,
   Target, Zap, Watch, Bluetooth, RefreshCw,
-  CloudSun, Calendar, Bell, Scan, Cpu, Sparkles, Plus, Settings,
-  Users, UserPlus, Search, Share2, Edit2, Heart, ImagePlus, UserMinus, Bot, X, Send,
-  Medal, Flame, Bike
+  CloudSun, Calendar, Bell, Scan, Sparkles, Plus, Settings,
+  Users, UserPlus, Search, Share2, Edit2, Heart, ImagePlus, UserMinus,
+  Medal, Flame, Bike, MessageCircle, Send, Bookmark, MoreHorizontal
 } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 import { supabase, isSupabaseConfigured } from './lib/supabase';
-import { GoogleGenAI } from '@google/genai';
+import { checkContent, REPORT_REASONS, type ReportReason } from './lib/moderation';
 import { Capacitor } from '@capacitor/core';
+import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
 import { Health } from '@capgo/capacitor-health';
 import { LocalNotifications, type ActionPerformed } from '@capacitor/local-notifications';
 import {
@@ -35,9 +36,9 @@ import {
   listPendingWaterSyncs,
   loadStoredWaterEntries,
   saveStoredWaterEntries,
-  upsertPendingWaterSync,
-  type WaterEntry,
+  upsertPendingWaterSync
 } from './lib/waterStorage';
+import { predictNextReminder, generateReminderMessage } from './lib/predictiveReminders';
 import {
   buildProgressShareText,
   DEFAULT_SOCIAL_COMPOSER,
@@ -49,9 +50,13 @@ import {
   type SocialFeedPost,
   type SocialProfileStats,
 } from './lib/social';
-
-// FIX BUG: Định nghĩa thêm trường actual_ml để tránh lỗi TypeScript khi dùng WaterEntry
-type LocalWaterEntry = WaterEntry & { actual_ml?: number };
+import {
+  generateHydrationAdvice,
+  scanDrinkFromImage,
+  createGeminiClient,
+  getGenerateContentModels
+} from './lib/ai';
+import type { UserProfile, Friend, SearchResult, LocalWaterEntry } from './types';
 
 import WelcomeScreen from './WelcomeScreen';
 import LoginScreen from './LoginScreen';
@@ -59,152 +64,73 @@ import RegisterScreen from './RegisterScreen';
 import InsightTab from './InsightTab';
 import LeagueTab from './LeagueTab';
 import CommentsSection from './CommentsSection';
+import HistoryModal from './components/HistoryModal';
+import EditEntryModal from './components/EditEntryModal';
+import PremiumModal from './components/PremiumModal';
+import AiChatModal from './components/AiChatModal';
+import CustomDrinkModal from './components/CustomDrinkModal';
+import OnboardingModal from './components/OnboardingModal';
+import AddFriendModal from './components/AddFriendModal';
+import EditProfileModal from './components/EditProfileModal';
 
-// ============================================================================
-// DIGIWELL SMART WELLNESS - PREMIUM DARK UI (V7 FIXED)
-// FIX #1: handleRegister upsert profiles sau signUp
-// FIX #2: waterGoal tự động theo Calendar/Watch thay vì currentActivity thủ công
-// ============================================================================
+// STORES & HOOKS
+import { useAuthStore } from './store/useAuthStore';
+import { useHydrationStore } from './store/useHydrationStore';
+import { useHealthStore } from './store/useHealthStore';
+import { useSocialStore } from './store/useSocialStore';
+import { useUIStore } from './store/useUIStore';
+import { useAuthLogic } from './hooks/useAuthLogic';
+import { useHydrationLogic } from './hooks/useHydrationLogic';
+import { useHealthLogic } from './hooks/useHealthLogic';
+import { useSocialLogic } from './hooks/useSocialLogic';
+import { useAiLogic } from './hooks/useAiLogic';
+import { useWaterGoal } from './hooks/useWaterGoal';
 
 function AppContent() {
+  // Stores
+  const auth = useAuthStore();
+  const hydration = useHydrationStore();
+  const health = useHealthStore();
+  const social = useSocialStore();
+  const ui = useUIStore();
 
-  // FIX BUG: Ref để thay thế useEffectEvent bị lỗi không tồn tại trong React 18
+  // Logic Hooks
+  useAuthLogic();
+  const { handleAddWater, handleDeleteEntry, flushPendingSyncs } = useHydrationLogic();
+  useHealthLogic();
+  const { refreshSocialFeed, handleSearchUser, handleAddFriend, loadSocialDirectory } = useSocialLogic();
+  const { aiAdvice, setAiAdvice, isAiLoading, chatMessages, setChatMessages, chatInput, setChatInput, isChatLoading, fetchAIAdvice, handleSendChatMessage } = useAiLogic();
+  const waterGoal = useWaterGoal();
+
   const handleHydrationNotificationActionRef = useRef<((action: ActionPerformed) => Promise<void>) | null>(null);
-
-  // ==========================================================================
-  // [1] QUẢN LÝ TRẠNG THÁI (STATES)
-  // ==========================================================================
-  const [view, setView] = useState<'welcome' | 'login' | 'register' | 'app'>('welcome');
-  const [activeTab, setActiveTab] = useState<'home' | 'insight' | 'league' | 'feed' | 'profile'>('home');
-  const [isWatchConnected, setIsWatchConnected] = useState(false);
-  const [watchData, setWatchData] = useState({ heartRate: 0, steps: 0 });
-  const [isWeatherSynced, setIsWeatherSynced] = useState(false);
-  const [weatherData, setWeatherData] = useState({ temp: 28, location: 'TP. Hồ Chí Minh', status: 'Nắng nhẹ' });
-  const [isCalendarSynced, setIsCalendarSynced] = useState(false);
-  
-  const [calendarEvents, setCalendarEvents] = useState([
-    { time: '09:00', title: 'Học môn Digital Citizen', location: 'Phòng A.05' },
-    { time: '14:00', title: 'Họp nhóm đồ án', location: 'Café Highland' }
-  ]);
-  
   const [now, setNow] = useState(() => new Date());
-  const [profile, setProfile] = useState<any>(null);
-  const [, setIsLoadingProfile] = useState(true);
-  
   const [loginPrefill, setLoginPrefill] = useState('');
-  
-  // Giữ lại để demo thuật toán thủ công khi chưa kết nối thiết bị
   const [currentActivity, setCurrentActivity] = useState<'chill' | 'light' | 'hard'>('chill');
-  
-  const [waterIntake, setWaterIntake] = useState(0);
-  const [streak] = useState(3); // Giữ lại state để sẵn sàng cho logic tự động tăng chuỗi sau này
-
-  // Lịch sử từng lần uống (lưu localStorage theo ngày)
-  type PendingHydrationAction = { amount: number; name: string; timestamp: number };
-  const PENDING_HYDRATION_ACTIONS_KEY = 'digiwell_pending_hydration_actions';
-  const [waterEntries, setWaterEntries] = useState<LocalWaterEntry[]>([]);
-  const [showHistory, setShowHistory] = useState(false);
-  const [editingEntry, setEditingEntry] = useState<LocalWaterEntry | null>(null);
-  const [editAmount, setEditAmount] = useState('');
-  const waterEntriesRef = useRef<LocalWaterEntry[]>([]);
-  const waterIntakeRef = useRef(0);
-  const [hasPendingCloudSync, setHasPendingCloudSync] = useState(false);
-  const hasPendingCloudSyncRef = useRef(false);
-
-  // State cho tính năng Scan AI
-  const [isScanning, setIsScanning] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [showSmartHub, setShowSmartHub] = useState(false);
+  const [streak] = useState(3);
+  const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isPrefsLoaded, setIsPrefsLoaded] = useState(false);
   const [reminderSettings, setReminderSettings] = useState<HydrationReminderSettings>({
     ...DEFAULT_HYDRATION_REMINDER_SETTINGS,
   });
   const [isReminderPermissionGranted, setIsReminderPermissionGranted] = useState(false);
   const [isApplyingReminderSettings, setIsApplyingReminderSettings] = useState(false);
-
-  const [showCustomDrink, setShowCustomDrink] = useState(false);
-  const [customDrinkForm, setCustomDrinkForm] = useState({ name: 'Trà đào', amount: 300 as number | string, factor: 1.0 });
-
-  // State cho Menu đồ uống mặc định
-  type DrinkPreset = { id: string; name: string; amount: number; factor: number; icon: string; color: string; };
-  const [drinkPresets, setDrinkPresets] = useState<DrinkPreset[]>(() => {
-    const saved = localStorage.getItem('digiwell_presets');
-    return saved ? JSON.parse(saved) : [
-      { id: '1', name: 'Nước lọc', amount: 250, factor: 1.0, icon: 'Droplet', color: 'cyan' },
-      { id: '2', name: 'Cà phê', amount: 200, factor: 0.8, icon: 'Coffee', color: 'orange' },
-      { id: '3', name: 'Bù khoáng', amount: 300, factor: 1.1, icon: 'Activity', color: 'emerald' },
-      { id: '4', name: 'Bia/Rượu', amount: 330, factor: -0.5, icon: 'Zap', color: 'red' }
-    ];
-  });
-  const [showPresetManager, setShowPresetManager] = useState(false);
-  const [editingPresets, setEditingPresets] = useState<DrinkPreset[]>(drinkPresets);
-
-  // State cho Onboarding (Hướng dẫn tân thủ)
-  const [showOnboarding, setShowOnboarding] = useState(false);
-  const [onboardingStep, setOnboardingStep] = useState(1);
-
-  // State cho Chat AI Premium
-  const [showAiChat, setShowAiChat] = useState(false);
-  const [chatMessages, setChatMessages] = useState<{role: string, content: string}[]>([]);
-  const [isChatLoading, setIsChatLoading] = useState(false);
-  const [chatInput, setChatInput] = useState('');
-
-  // ==========================================================================
-  // [NEW] PREMIUM FEATURES STATES
-  // ==========================================================================
-  const [isPremium, setIsPremium] = useState(false);
-  const [showPremiumModal, setShowPremiumModal] = useState(false);
-  const [leagueMode, setLeagueMode] = useState<'public' | 'friends'>('public');
-  const [isFastingMode, setIsFastingMode] = useState(() => !!localStorage.getItem('digiwell_fasting_start'));
-  const [fastingStartTime, setFastingStartTime] = useState<number | null>(() => {
-    const saved = localStorage.getItem('digiwell_fasting_start');
-    return saved ? parseInt(saved, 10) : null;
-  });
-  const [isExportingPDF, setIsExportingPDF] = useState(false);
-  const [showProfileSettings, setShowProfileSettings] = useState(false);
-
-  // Social & Friends
-  const [showAddFriend, setShowAddFriend] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [friendsList, setFriendsList] = useState<any[]>([]);
-  const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
-  const [showSocialComposer, setShowSocialComposer] = useState(false);
-  const [showDiscoverPeople, setShowDiscoverPeople] = useState(false);
-  const [showSocialProfile, setShowSocialProfile] = useState(false);
-  const [socialComposer, setSocialComposer] = useState<SocialComposerState>({ ...DEFAULT_SOCIAL_COMPOSER });
-  const [socialPosts, setSocialPosts] = useState<SocialFeedPost[]>([]);
-  const [socialStories, setSocialStories] = useState<SocialFeedPost[]>([]);
-  const [expandedPostId, setExpandedPostId] = useState<string | null>(null);
-  const [socialSearchQuery, setSocialSearchQuery] = useState('');
-  const [socialSearchResults, setSocialSearchResults] = useState<SocialDiscoverProfile[]>([]);
-  const [socialFollowingIds, setSocialFollowingIds] = useState<string[]>([]);
-  const [socialProfileStats, setSocialProfileStats] = useState<SocialProfileStats>(DEFAULT_SOCIAL_PROFILE_STATS);
-  const [socialError, setSocialError] = useState('');
-  const [isSocialLoading, setIsSocialLoading] = useState(false);
-  const [isPublishingSocialPost, setIsPublishingSocialPost] = useState(false);
-  const [isSocialSearching, setIsSocialSearching] = useState(false);
   const [socialImageFile, setSocialImageFile] = useState<File | null>(null);
   const [socialImagePreview, setSocialImagePreview] = useState('');
   const socialImageInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [expandedPostId, setExpandedPostId] = useState<string | null>(null);
+  const [activePostActionMenu, setActivePostActionMenu] = useState<string | null>(null);
+  const [editingSocialPostId, setEditingSocialPostId] = useState<string | null>(null);
+  const [reportingPostId, setReportingPostId] = useState<string | null>(null);
+  const [reportReason, setReportReason] = useState<ReportReason>(REPORT_REASONS[0]);
+  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+  const [storyViewerIndex, setStoryViewerIndex] = useState<number>(-1);
+  const [storyProgress, setStoryProgress] = useState(0);
+  const [storyPaused, setStoryPaused] = useState(false);
+  const [isSocialLoading, setIsSocialLoading] = useState(false);
+  const [isPublishingSocialPost, setIsPublishingSocialPost] = useState(false);
+  const [isSocialSearching, setIsSocialSearching] = useState(false);
 
-  // ==========================================================================
-  // [NEW] CẬP NHẬT HỒ SƠ STATES
-  // ==========================================================================
-  const [showEditProfile, setShowEditProfile] = useState(false);
-  const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
-  const [editProfileData, setEditProfileData] = useState({
-    nickname: '', gender: 'Nam', age: 20, height: 172, weight: 82, activity: 'active', climate: 'Nhiệt đới (Nóng)', goal: 'Giảm mỡ & Tăng cơ'
-  });
-
-  // ==========================================================================
-  // [NEW] REAL AI GEMINI STATES
-  // ==========================================================================
-  const [aiAdvice, setAiAdvice] = useState<string>('');
-  const [isAiLoading, setIsAiLoading] = useState(false);
-  const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY?.trim();
-  const availableGeminiModelsRef = useRef<string[] | null>(null);
 
   // ==========================================================================
   // [2] LOGIC SUPABASE CLOUD SYNC
@@ -244,7 +170,7 @@ function AppContent() {
   };
 
   // Tải danh sách bạn bè thật từ Supabase
-  const fetchFriendsData = async () => {
+  const fetchFriendsData = useCallback(async () => {
     if (!profile?.id) return;
     try {
       // 1. Lấy danh sách ID bạn bè
@@ -284,7 +210,7 @@ function AppContent() {
     } catch (err) {
       console.error("Lỗi tải bạn bè:", err);
     }
-  };
+  }, [profile?.id]);
 
   // Tìm kiếm User thật theo Nickname
   const handleSearchUser = async (query: string) => {
@@ -374,8 +300,8 @@ function AppContent() {
           localStorage.removeItem('google_provider_token'); // Xóa token Google khi đăng xuất
           setView('welcome'); 
         }
-      } finally { 
-        if (isMounted) setIsLoadingProfile(false); 
+      } catch (error) {
+        console.error('Auth state change error:', error);
       }
     });
     
@@ -576,8 +502,6 @@ function AppContent() {
   useEffect(() => {
     if (!isWatchConnected) return;
 
-    let interval: number;
-
     const fetchRealHealthData = async () => {
       // Fallback: Chạy trên Web/Android thì dùng mock data để không bị crash
       if (Capacitor.getPlatform() !== 'ios') {
@@ -626,7 +550,7 @@ function AppContent() {
     };
 
     fetchRealHealthData();
-    interval = window.setInterval(fetchRealHealthData, 10000); // Lấy data mỗi 10 giây
+    const interval = window.setInterval(fetchRealHealthData, 10000); // Lấy data mỗi 10 giây
 
     return () => clearInterval(interval);
   }, [isWatchConnected]);
@@ -731,19 +655,51 @@ function AppContent() {
     return message;
   };
 
-  const resetSocialComposer = () => {
+  const resetSocialComposer = useCallback(() => {
     if (socialImagePreview.startsWith('blob:')) {
       URL.revokeObjectURL(socialImagePreview);
     }
     setSocialComposer({ ...DEFAULT_SOCIAL_COMPOSER });
     setSocialImageFile(null);
     setSocialImagePreview('');
-  };
+    setEditingSocialPostId(null);
+  }, [socialImagePreview]);
 
   const closeSocialComposer = () => {
     resetSocialComposer();
     setShowSocialComposer(false);
   };
+
+  // ── Story Viewer Timer (useEffect-based, mobile-safe) ──
+  useEffect(() => {
+    if (storyViewerIndex < 0 || storyViewerIndex >= socialStories.length) return;
+    if (storyPaused) return;
+
+    const DURATION = 8000;
+    const TICK = 50;
+    const increment = (TICK / DURATION) * 100;
+
+    const timer = setInterval(() => {
+      setStoryProgress(prev => {
+        const next = prev + increment;
+        if (next >= 100) {
+          // Auto-advance to next story or close
+          setTimeout(() => {
+            if (storyViewerIndex < socialStories.length - 1) {
+              setStoryViewerIndex(storyViewerIndex + 1);
+              setStoryProgress(0);
+            } else {
+              setStoryViewerIndex(-1);
+            }
+          }, 0);
+          return 100;
+        }
+        return next;
+      });
+    }, TICK);
+
+    return () => clearInterval(timer);
+  }, [storyViewerIndex, storyPaused, socialStories.length]);
 
   const openSocialComposer = (kind: SocialComposerState['postKind'] = 'status') => {
     if (!profile?.id) {
@@ -786,7 +742,7 @@ function AppContent() {
     return supabase!.storage.from('social-media').getPublicUrl(filePath).data.publicUrl;
   };
 
-  const loadSocialDirectory = async (query: string) => {
+  const loadSocialDirectory = useCallback(async (query: string) => {
     if (!profile?.id) return;
 
     setIsSocialSearching(true);
@@ -817,9 +773,9 @@ function AppContent() {
     } finally {
       setIsSocialSearching(false);
     }
-  };
+  }, [profile?.id, socialFollowingIds]);
 
-  const refreshSocialFeed = async (options?: { silent?: boolean }) => {
+  const refreshSocialFeed = useCallback(async (options?: { silent?: boolean }) => {
     if (!profile?.id) return;
 
     if (!options?.silent) {
@@ -922,7 +878,7 @@ function AppContent() {
     } finally {
       setIsSocialLoading(false);
     }
-  };
+  }, [profile?.id]);
 
   // ==========================================================================
   // [5] CÁC HÀM XỬ LÝ (CONTROLLERS)
@@ -954,116 +910,28 @@ function AppContent() {
     await handleAddWater(intent.amount, 1, intent.name);
   };
 
-  const createGeminiClient = () => {
-    if (!geminiApiKey) throw new Error("Chưa cấu hình VITE_GEMINI_API_KEY");
-    return new GoogleGenAI({ apiKey: geminiApiKey });
-  };
-
-  const getGenerateContentModels = async (ai: GoogleGenAI) => {
-    if (availableGeminiModelsRef.current?.length) return availableGeminiModelsRef.current;
-
-    const preferredModels = [
-      'models/gemini-2.5-flash',
-      'models/gemini-2.5-flash-lite',
-      'models/gemini-2.0-flash',
-      'models/gemini-2.0-flash-lite',
-      'models/gemini-flash-latest',
-      'models/gemini-flash-lite-latest',
-    ];
-
-    try {
-      const pager = await ai.models.list({ config: { pageSize: 100 } });
-      const availableModels = new Set<string>();
-
-      for await (const model of pager) {
-        if (model.name && model.supportedActions?.includes('generateContent')) {
-          availableModels.add(model.name);
-        }
-      }
-
-      const modelsToTry = preferredModels.filter(modelName => availableModels.has(modelName));
-      if (modelsToTry.length > 0) {
-        availableGeminiModelsRef.current = modelsToTry;
-        return modelsToTry;
-      }
-    } catch (error) {
-      console.warn('Không thể tải danh sách Gemini models:', error);
-    }
-
-    availableGeminiModelsRef.current = preferredModels;
-    return preferredModels;
-  };
-
-  const getGeminiErrorMessage = (error: unknown) => {
-    const rawMessage = error instanceof Error ? error.message : String(error);
-
-    if (
-      rawMessage.includes('NOT_FOUND') &&
-      rawMessage.toLowerCase().includes('models/')
-    ) {
-      return "Model Gemini cũ không còn hỗ trợ cho generateContent nữa.";
-    }
-
-    if (
-      rawMessage.includes('RESOURCE_EXHAUSTED') ||
-      rawMessage.includes('"code":429') ||
-      rawMessage.toLowerCase().includes('quota exceeded')
-    ) {
-      return "Gemini API đang hết quota hoặc project Google AI Studio chưa bật billing.";
-    }
-
-    return rawMessage;
-  };
-
   // Gọi AI Gemini thật
-  const fetchAIAdvice = async () => {
+  const fetchAIAdvice = async (mood?: string, meal?: string) => {
     if (isAiLoading) return;
     setIsAiLoading(true);
     
     try {
-      // Tạo Context (Bối cảnh) gửi cho AI
-      const prompt = `Bạn là trợ lý sức khỏe AI của app DigiWell.
-      Thông tin của tôi lúc này:
-      - Thời gian: ${now.getHours()} giờ ${now.getMinutes()} phút
-      - Lượng nước đã uống: ${waterIntake}/${waterGoal} ml
-      - Thời tiết hiện tại: ${weatherData.temp}°C, ${weatherData.status}
-      - Nhịp tim: ${watchData.heartRate} BPM, Số bước: ${watchData.steps}
-      - Sự kiện sắp tới: ${isCalendarSynced ? calendarEvents[0]?.title : 'Không có lịch'}
-      
-      Dựa vào các thông tin trên, hãy đưa ra 1 lời khuyên thật ngắn gọn, tự nhiên, thân thiện (dưới 35 chữ) về việc uống nước hoặc nghỉ ngơi. Không cần chào hỏi dài dòng.`;
-
-      const ai = createGeminiClient();
-      
-      // Tự động lấy danh sách model generateContent mà API Key của bạn đang hỗ trợ
-      const modelsToTry = await getGenerateContentModels(ai);
-      let advice = "";
-      let lastErr = null;
-      
-      for (const modelName of modelsToTry) {
-        try {
-          console.log(`Đang gọi AI bằng model: ${modelName}...`);
-          const result = await ai.models.generateContent({
-            model: modelName,
-            contents: prompt
-          });
-          advice = result.text || "";
-          console.log("AI chạy thành công!");
-          break; // Thành công thì thoát vòng lặp ngay
-        } catch (e: any) { 
-          console.error(`Lỗi ở model ${modelName}:`, e.message); // IN LỖI CHI TIẾT RA ĐÂY
-          lastErr = e; 
-        }
-      }
-      
-      if (!advice) throw lastErr || new Error("Tất cả model AI đều bị từ chối");
-      
-      setAiAdvice(advice.replace(/\*/g, '')); // Xóa các dấu * in đậm của markdown nếu có
-    } catch (err: any) {
-      const message = getGeminiErrorMessage(err);
-      toast.error("Lỗi AI: " + message);
-      setAiAdvice(message.includes('hết quota')
-        ? "Gemini API đang hết quota, kiểm tra billing rồi thử lại nhé!"
-        : "Hệ thống AI đang bảo trì, vui lòng uống đủ nước bạn nhé!");
+      const context = {
+        nowIso: now.toISOString(),
+        waterIntake: waterIntakeRef.current,
+        waterGoal,
+        weather: isWeatherSynced ? weatherData : undefined,
+        watch: isWatchConnected ? watchData : undefined,
+        calendar: { synced: isCalendarSynced, nextEventTitle: calendarEvents[0]?.title },
+        profile: profile || undefined,
+        mood,
+        meal
+      };
+      const advice = await generateHydrationAdvice(context);
+      setAiAdvice(advice);
+    } catch (error) {
+      console.error("Lỗi fetch AI Advice:", error);
+      setAiAdvice("Hệ thống AI đang bảo trì, vui lòng uống đủ nước bạn nhé!");
     } finally {
       setIsAiLoading(false);
     }
@@ -1169,10 +1037,10 @@ ${historyText}`;
 
       let lastErr: any = null;
       for (const modelName of modelsToTry) {
-        try {
-          let currentConversation = [...conversation];
-          let loopCount = 0;
-          let isDone = false;
+            try {
+              const currentConversation = [...conversation];
+              let loopCount = 0;
+              let isDone = false;
 
           // Khởi tạo Agentic Loop (Tối đa 3 bước: Suy nghĩ -> Gọi hàm -> Trả lời)
           while (loopCount < 3 && !isDone) {
@@ -1310,7 +1178,7 @@ ${historyText}`;
   };
 
   // Helper: sync tổng lên Supabase
-  const flushPendingWaterSyncs = async (silent: boolean = false) => {
+  const flushPendingWaterSyncs = useCallback(async (silent: boolean = false) => {
     if (!profile?.id) return false;
 
     const pendingSyncs = listPendingWaterSyncs(profile.id).sort((a, b) => a.updatedAt - b.updatedAt);
@@ -1340,7 +1208,7 @@ ${historyText}`;
       setHasPendingCloudSync(true);
       return false;
     }
-  };
+  }, [profile?.id]);
 
   const syncTotalToCloud = async (total: number, options?: { silent?: boolean }) => {
     if (!profile?.id) return;
@@ -1419,9 +1287,9 @@ ${historyText}`;
       const localTotal = localEntries.reduce((sum: number, e: any) => sum + (e.actual_ml || e.amount), 0);
     const pendingSync = getPendingWaterSync(profile.id, todayStr);
 
-    waterEntriesRef.current = localEntries;
+    waterEntriesRef.current = localEntries as LocalWaterEntry[];
     waterIntakeRef.current = localTotal;
-    setWaterEntries(localEntries);
+    setWaterEntries(localEntries as LocalWaterEntry[]);
     setWaterIntake(localEntries.length > 0 ? localTotal : pendingSync?.total || 0);
     setHasPendingCloudSync(Boolean(pendingSync));
 
@@ -1446,7 +1314,7 @@ ${historyText}`;
     hasPendingCloudSyncRef.current = hasPendingCloudSync;
   }, [hasPendingCloudSync]);
 
-  const handleAddWater = async (amount: number, factor: number = 1.0, name: string = 'Nước lọc') => {
+  const handleAddWater = useCallback(async (amount: number, factor: number = 1.0, name: string = 'Nước lọc') => {
     if (!profile?.id) return toast.error("Vui lòng đăng nhập lại!");
     const actualHydration = Math.round(amount * factor);
     const entry = { id: Date.now().toString(), amount, actual_ml: actualHydration, name, timestamp: Date.now() };
@@ -1464,26 +1332,45 @@ ${historyText}`;
     setWaterIntake(newTotal);
     saveEntries(newEntries);
     
+    await Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
+    
     if (factor < 0) {
       toast.error(`Đã uống ${name}. Mất ${Math.abs(actualHydration)}ml lượng nước cơ thể! 📉`);
     } else {
       toast.success(`+${actualHydration}ml (${name})! Đã lưu vào nhật ký hôm nay.`);
       
-      // Confetti celebration khi vừa đạt 100% mục tiêu
+      // Confetti celebration siêu mượt khi vừa đạt 100% mục tiêu
       if (justReachedGoal && factor > 0) {
         setTimeout(() => {
-          confetti({
-            particleCount: 150,
-            spread: 80,
-            origin: { y: 0.6 },
-            colors: ['#06b6d4', '#0ea5e9', '#22d3ee', '#34d399', '#fbbf24'],
-          });
-          toast.success('🎉 Chúc mừng! Bạn đã hoàn thành mục tiêu nước hôm nay!');
+          const count = 250;
+          const defaults = { origin: { y: 0.7 }, zIndex: 9999 };
+          function fire(particleRatio: number, opts: any) {
+            confetti({ ...defaults, ...opts, particleCount: Math.floor(count * particleRatio) });
+          }
+          fire(0.25, { spread: 26, startVelocity: 55 });
+          fire(0.2, { spread: 60 });
+          fire(0.35, { spread: 100, decay: 0.91, scalar: 0.8 });
+          fire(0.1, { spread: 120, startVelocity: 25, decay: 0.92, scalar: 1.2 });
+          fire(0.1, { spread: 120, startVelocity: 45 });
+          
+          Haptics.notification({ type: NotificationType.Success }).catch(() => {});
+          toast.success('🎉 Chúc mừng! Bạn đã hoàn thành 100% mục tiêu nước hôm nay!', { duration: 5000 });
         }, 300);
+      } else if (newTotal < waterGoal) {
+        try {
+          const prediction = predictNextReminder(newEntries, newTotal, waterGoal, { startHour: 8, endHour: 22, intervalMinutes: 120 });
+          if (prediction && prediction.confidence >= 75) {
+            setTimeout(() => {
+              toast('🤖 AI Coach: ' + generateReminderMessage(prediction, newTotal, waterGoal), { 
+                icon: '👀', duration: 4000 
+              });
+            }, 1000);
+          }
+        } catch(e) {}
       }
     }
     await syncTotalToCloud(newTotal);
-  };
+  }, [profile?.id, waterGoal, waterIntakeRef, waterEntriesRef, saveEntries]);
 
   const handleDeleteEntry = async (id: string) => {
     const newEntries = waterEntriesRef.current.filter(e => e.id !== id);
@@ -1632,6 +1519,56 @@ ${historyText}`;
     }
   };
 
+  const handleDeleteSocialPost = async (postId: string) => {
+    if (!profile?.id || !confirm('Bạn chắc chắn muốn xóa bài viết này?')) return;
+    try {
+      const { error } = await supabase!.from('social_posts').delete().eq('id', postId).eq('author_id', profile.id);
+      if (error) throw error;
+      setSocialPosts(prev => prev.filter(p => p.id !== postId));
+      toast.success('Đã xóa bài viết.');
+      setActivePostActionMenu(null);
+    } catch (err: any) {
+      toast.error(getSocialErrorMessage(err.message));
+    }
+  };
+
+  const startEditSocialPost = (post: SocialFeedPost) => {
+    setSocialComposer({
+      content: post.content,
+      imageUrl: post.image_url || '',
+      postKind: post.post_kind as 'status' | 'progress' | 'story',
+      visibility: post.visibility as 'public' | 'followers'
+    });
+    setEditingSocialPostId(post.id);
+    setShowSocialComposer(true);
+    setActivePostActionMenu(null);
+  };
+
+  const handleReportPost = async () => {
+    if (!profile?.id || !reportingPostId) return;
+    setIsSubmittingReport(true);
+    try {
+      const { error } = await supabase!.from('social_reports').insert({
+        post_id: reportingPostId,
+        reporter_id: profile.id,
+        reason: reportReason,
+      });
+      if (error) {
+        if (error.code === '23505') {
+          toast.info('Bạn đã báo cáo bài viết này rồi.');
+        } else throw error;
+      } else {
+        toast.success('Đã gửi báo cáo. Cảm ơn bạn đã giúp giữ gìn cộng đồng!');
+      }
+    } catch (err: any) {
+      toast.error('Không thể gửi báo cáo. Vui lòng thử lại.');
+    } finally {
+      setIsSubmittingReport(false);
+      setReportingPostId(null);
+      setActivePostActionMenu(null);
+    }
+  };
+
   const handlePublishSocialPost = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!profile?.id) return;
@@ -1642,6 +1579,18 @@ ${historyText}`;
     if (!trimmedContent && !trimmedImageUrl && !socialImageFile) {
       toast.error('Viết gì đó hoặc thêm ảnh trước khi đăng.');
       return;
+    }
+
+    // ── DigiGuard Layer 1: Client-side moderation ──
+    if (trimmedContent) {
+      const mod = checkContent(trimmedContent);
+      if (mod.level === 'blocked') {
+        toast.error(`🛡️ DigiGuard: ${mod.reason}`, { duration: 5000 });
+        return;
+      }
+      if (mod.level === 'warn') {
+        toast.warning(`⚠️ ${mod.reason}`, { duration: 4000 });
+      }
     }
 
     setIsPublishingSocialPost(true);
@@ -1657,22 +1606,36 @@ ${historyText}`;
         ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
         : null;
 
-      const { error } = await supabase!.from('social_posts').insert({
-        author_id: profile.id,
-        content: trimmedContent,
-        image_url: imageUrl,
-        post_kind: socialComposer.postKind,
-        visibility: socialComposer.visibility,
-        hydration_ml: waterIntake,
-        streak_snapshot: streak,
-        expires_at: expiresAt,
-      });
-      if (error) throw error;
+      if (editingSocialPostId) {
+        const { error } = await supabase!.from('social_posts')
+          .update({
+            content: trimmedContent,
+            image_url: imageUrl,
+            visibility: socialComposer.visibility,
+          })
+          .eq('id', editingSocialPostId)
+          .eq('author_id', profile.id);
+        if (error) throw error;
+        toast.success('Đã cập nhật bài viết.', { id: toastId });
+      } else {
+        const { error } = await supabase!.from('social_posts').insert({
+          author_id: profile.id,
+          content: trimmedContent,
+          image_url: imageUrl,
+          post_kind: socialComposer.postKind,
+          visibility: socialComposer.visibility,
+          hydration_ml: waterIntake,
+          streak_snapshot: streak,
+          expires_at: expiresAt,
+        });
+        if (error) throw error;
 
-      toast.success(
-        socialComposer.postKind === 'story' ? 'Story đã lên sóng 24 giờ.' : 'Bài đăng đã xuất hiện trên feed.',
-        { id: toastId },
-      );
+        toast.success(
+          socialComposer.postKind === 'story' ? 'Story đã lên sóng 24 giờ.' : 'Bài đăng đã xuất hiện trên feed.',
+          { id: toastId },
+        );
+      }
+      
       closeSocialComposer();
       await refreshSocialFeed({ silent: true });
     } catch (err: any) {
@@ -1769,6 +1732,7 @@ ${historyText}`;
   const openEditProfile = () => {
     if (profile) {
       setEditProfileData({
+        id: profile.id,
         nickname: profile.nickname || '', gender: profile.gender || 'Nam',
         age: profile.age || 20, height: profile.height || 170, weight: profile.weight || 60,
         activity: profile.activity || 'active', climate: profile.climate || 'Nhiệt đới (Nóng)', goal: profile.goal || 'Sức khỏe tổng quát'
@@ -1954,7 +1918,6 @@ ${historyText}`;
   };
 
   const handleScan = () => {
-    if (!geminiApiKey) return toast.error("Vui lòng cấu hình VITE_GEMINI_API_KEY!");
     fileInputRef.current?.click();
   };
 
@@ -1966,54 +1929,12 @@ ${historyText}`;
     const tid = toast.loading("AI đang phân tích hình ảnh...");
     
     try {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = async () => {
-        try {
-          const base64Data = (reader.result as string).split(',')[1];
-          const ai = createGeminiClient();
-          
-          const prompt = "Đây là hình ảnh một loại đồ uống. Hãy ước lượng dung tích và loại nước. Trả về ĐÚNG 1 dòng theo định dạng này: [Tên đồ uống] - [Dung tích dự đoán bằng số]ml. Ví dụ: Cà phê đen - 200ml. Nếu trong ảnh không có đồ uống, hãy trả về: Lỗi - Không nhận diện được.";
-          
-          const modelsToTry = await getGenerateContentModels(ai);
-          let responseText = "";
-          let lastErr = null;
-          
-          for (const modelName of modelsToTry) {
-            try {
-              const result = await ai.models.generateContent({
-                model: modelName,
-                contents: [ prompt, { inlineData: { data: base64Data, mimeType: file.type } } ]
-              });
-              responseText = result.text || "";
-              break;
-            } catch (e: any) { lastErr = e; }
-          }
-          
-          if (!responseText) throw lastErr || new Error("Không có model nào khả dụng để phân tích ảnh!");
-          if (responseText.includes("Lỗi")) throw new Error("Không nhận ra đồ uống trong ảnh!");
-          
-          const match = responseText.match(/(.*)\s*-\s*(\d+)\s*ml/i);
-          if (match) {
-            const name = match[1].trim();
-            const amount = parseInt(match[2]);
-            let factor = 1.0;
-            if (name.toLowerCase().includes("cà phê") || name.toLowerCase().includes("coffee")) factor = 0.8;
-            else if (name.toLowerCase().includes("bia") || name.toLowerCase().includes("rượu")) factor = -0.5;
-            
-            handleAddWater(amount, factor, `${name} (AI Scan)`);
-            toast.success(`AI nhận diện: ${name} (${amount}ml)`, { id: tid });
-          } else {
-            throw new Error("Không thể dự đoán dung tích!");
-          }
-        } catch (err: any) {
-          toast.error(getGeminiErrorMessage(err) || "Lỗi xử lý ảnh từ AI", { id: tid });
-        } finally {
-          setIsScanning(false);
-        }
-      };
+      const { name, amount, factor } = await scanDrinkFromImage(file);
+      handleAddWater(amount, factor, `${name} (AI Scan)`);
+      toast.success(`AI nhận diện: ${name} (${amount}ml)`, { id: tid });
     } catch (err: any) {
       toast.error(err.message, { id: tid });
+    } finally {
       setIsScanning(false);
     }
     e.target.value = '';
@@ -2051,9 +1972,10 @@ ${historyText}`;
     { icon: Watch, label: 'Watch / HealthKit', sub: 'Nhịp tim và bước chân thời gian thực', active: isWatchConnected, action: () => setIsWatchConnected(!isWatchConnected), activeColor: '#22d3ee', activeBg: 'rgba(6,182,212,0.2)', activeBorder: 'rgba(6,182,212,0.4)' },
   ];
   const connectedSystemsCount = connectedSystems.filter(item => item.active).length;
-  const assistantFace = progress < 30 ? '(;-;)' : progress < 70 ? '(o_o)' : '(^o^)';
-  const assistantStatus = progress < 30 ? 'Hydration thấp' : progress < 70 ? 'Đang ổn định' : 'Đang rất tốt';
-  const assistantTone = progress < 30 ? 'text-red-400' : progress < 70 ? 'text-cyan-400' : 'text-emerald-400';
+  const holoPetEmoji = streak < 3 ? '🥚' : streak < 7 ? '🐥' : streak < 14 ? '🦩' : streak < 30 ? '🦄' : '🐉';
+  const holoPetLevel = Math.floor(streak / 3) + 1;
+  const assistantStatus = streak < 3 ? 'Đang ấp trứng' : streak < 7 ? 'Chim non' : streak < 14 ? 'Tiến hóa' : streak < 30 ? 'Thần thú' : 'Huyền thoại';
+  const assistantTone = streak < 3 ? 'text-slate-400' : streak < 7 ? 'text-amber-400' : streak < 14 ? 'text-pink-400' : streak < 30 ? 'text-fuchsia-400' : 'text-emerald-400';
   const visibleDrinkPresets = drinkPresets.slice(0, 6);
   const primaryDrinkPreset = visibleDrinkPresets.find(preset => preset.name.toLowerCase().includes('nước')) || visibleDrinkPresets[0];
   const secondaryDrinkPresets = visibleDrinkPresets.filter(preset => preset.id !== primaryDrinkPreset?.id).slice(0, 4);
@@ -2161,13 +2083,13 @@ ${historyText}`;
                   ))}
                 </div>
 
-                <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/25 p-4 flex items-center gap-4">
-                  <div className={`w-16 h-16 rounded-2xl flex items-center justify-center border flex-shrink-0 ${progress < 30 ? 'bg-red-500/10 border-red-500/20' : progress < 70 ? 'bg-cyan-500/10 border-cyan-500/20' : 'bg-emerald-500/10 border-emerald-500/20'}`}>
-                    <span className="text-2xl font-mono text-white font-black">{assistantFace}</span>
+                <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/25 p-4 flex items-center gap-4 group">
+                  <div className={`w-16 h-16 rounded-2xl flex items-center justify-center border flex-shrink-0 transition-transform group-hover:scale-110 ${progress < 30 ? 'bg-red-500/10 border-red-500/20' : progress < 70 ? 'bg-cyan-500/10 border-cyan-500/20' : 'bg-emerald-500/10 border-emerald-500/20'}`}>
+                    <span className="text-3xl text-white font-black animate-pulse" style={{ animationDuration: '3s' }}>{holoPetEmoji}</span>
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className={`text-sm font-black ${assistantTone}`}>{assistantStatus}</p>
-                    <p className="text-cyan-100/60 text-xs mt-1">Holo-Pet</p>
+                    <p className="text-cyan-100/60 text-xs mt-1">Holo-Pet Lvl.{holoPetLevel} • Sinh lực {completionPercent}%</p>
                   </div>
                   <button onClick={() => setShowHistory(true)} className="px-3 py-2 rounded-xl bg-slate-900/70 border border-white/10 text-white text-[11px] font-bold flex items-center gap-2 active:scale-95 transition-all">
                     <BarChart2 size={14} /> Lịch sử
@@ -2275,185 +2197,170 @@ ${historyText}`;
 
         {/* ==================== FEED TAB ==================== */}
         {activeTab === 'feed' && (
-          <div className="animate-in slide-in-from-right duration-300 space-y-5">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest">Cộng đồng</p>
-                <h2 className="text-2xl font-black text-white mt-1">Feed</h2>
-              </div>
-              <button
-                onClick={() => setShowSocialProfile(true)}
-                className="w-11 h-11 rounded-2xl border border-cyan-500/25 bg-slate-900/80 flex items-center justify-center shadow-[0_0_16px_rgba(34,211,238,0.12)] active:scale-95 transition-all"
-                title="Hồ sơ mạng xã hội"
-              >
-                <span className="text-sm font-black text-cyan-300">{(profile?.nickname || 'U')[0].toUpperCase()}</span>
-              </button>
-            </div>
-
-            <div className={`${card} p-4 border border-cyan-500/15`}>
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-2xl flex items-center justify-center font-black text-white shadow-inner flex-shrink-0" style={{ background: 'linear-gradient(135deg, #06b6d4, #0ea5e9)' }}>
-                  {(profile?.nickname || 'U')[0].toUpperCase()}
-                </div>
-                <button onClick={() => openSocialComposer('status')} className="flex-1 h-11 rounded-2xl bg-slate-900/80 border border-slate-700 text-slate-300 text-sm font-semibold text-left px-4 active:scale-[0.99] transition-all">
-                  Hôm nay bạn muốn chia sẻ gì?
+          <div className="animate-in slide-in-from-right duration-300 bg-slate-950 min-h-screen -mx-5 -mt-6 pb-6">
+            {/* Instagram Style Header */}
+            <div className="flex items-center justify-between px-4 pb-3 pt-6 border-b border-slate-900 bg-slate-950 sticky top-0 z-20">
+              <h2 className="text-2xl font-bold text-white italic" style={{ fontFamily: 'serif' }}>Digigram</h2>
+              <div className="flex items-center gap-5">
+                <button onClick={() => setShowSocialProfile(true)} className="relative hover:opacity-80 transition-opacity">
+                  <Heart size={26} className="text-white" />
+                  <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-rose-500 border-[2px] border-slate-950"></span>
                 </button>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2 mt-3">
-                <button onClick={() => openSocialComposer('progress')} className="py-3 rounded-xl bg-indigo-500/12 border border-indigo-500/25 text-indigo-300 text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all">
-                  <Share2 size={14} /> Tiến độ
-                </button>
-                <button onClick={() => openSocialComposer('story')} className="py-3 rounded-xl bg-fuchsia-500/10 border border-fuchsia-500/25 text-fuchsia-300 text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all">
-                  <Plus size={14} /> Story
-                </button>
-                <button onClick={() => setShowDiscoverPeople(true)} className="py-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all">
-                  <Users size={14} /> Khám phá
-                </button>
+                <button className="hover:opacity-80 transition-opacity"><Send size={24} className="text-white" /></button>
               </div>
             </div>
 
-            <div className={`${card} p-4`}>
-              <div className="flex items-center justify-between mb-3">
-                <div>
-                  <p className="text-white text-sm font-semibold">Stories</p>
-                </div>
-                <button onClick={() => openSocialComposer('story')} className="px-3 py-2 rounded-xl bg-fuchsia-500/10 border border-fuchsia-500/30 text-fuchsia-300 text-[11px] font-bold active:scale-95 transition-all">
-                  + Story
-                </button>
-              </div>
-
-              {socialStories.length > 0 ? (
-                <div className="flex gap-3 overflow-x-auto scrollbar-hide pb-1 snap-x snap-mandatory">
-                  {socialStories.map(story => (
-                    <div key={story.id} className="min-w-[132px] rounded-2xl border border-fuchsia-500/20 bg-slate-900/60 p-3 snap-start">
-                      <div className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3 shadow-inner" style={{ background: 'linear-gradient(135deg, rgba(217,70,239,0.45), rgba(34,211,238,0.35))' }}>
-                        <span className="text-lg font-black text-white">{story.author.nickname[0]?.toUpperCase() || 'D'}</span>
-                      </div>
-                      <p className="text-white text-sm font-bold truncate">{story.author.nickname}</p>
-                      <p className="text-slate-400 text-[10px] uppercase tracking-wider mt-1">{getRelativeTimeLabel(story.created_at)}</p>
-                      <p className="text-fuchsia-300 text-[10px] mt-2 font-semibold">{story.hydration_ml || 0}ml · streak {story.streak_snapshot || 0}</p>
+            {/* Instagram Style Stories */}
+            <div className="flex gap-4 overflow-x-auto scrollbar-hide px-4 py-4 border-b border-slate-900 bg-slate-950">
+              {/* My Story */}
+              <div className="flex flex-col items-center gap-1 flex-shrink-0 cursor-pointer group" onClick={() => openSocialComposer('story')}>
+                <div className="relative">
+                  <div className="w-[68px] h-[68px] rounded-full bg-slate-800 p-0.5 transition-transform group-hover:scale-95">
+                    <div className="w-full h-full rounded-full bg-slate-900 border-2 border-slate-950 flex items-center justify-center overflow-hidden">
+                       <span className="text-2xl text-slate-500 font-black">{(profile?.nickname || 'U')[0].toUpperCase()}</span>
                     </div>
-                  ))}
+                  </div>
+                  <div className="absolute bottom-1 right-0 w-[22px] h-[22px] bg-blue-500 rounded-full border-[3px] border-slate-950 flex items-center justify-center">
+                     <Plus size={14} className="text-white font-bold" />
+                  </div>
                 </div>
-              ) : (
-                <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/40 p-4 text-center">
-                  <p className="text-white text-sm font-semibold mb-4">Chưa có story nào.</p>
-                  <button onClick={() => openSocialComposer('story')} className="px-4 py-2 rounded-xl bg-fuchsia-500/15 border border-fuchsia-500/30 text-fuchsia-300 text-xs font-bold active:scale-95 transition-all">
-                    Đăng story đầu tiên
-                  </button>
+                <span className="text-[11px] text-slate-400 truncate w-16 text-center mt-1">Tin của bạn</span>
+              </div>
+
+              {/* Friends Stories */}
+              {socialStories.map((story, idx) => (
+                <div key={story.id} className="flex flex-col items-center gap-1 flex-shrink-0 cursor-pointer group" onClick={() => { setStoryViewerIndex(idx); setStoryProgress(0); setStoryPaused(false); }}>
+                  <div className="w-[68px] h-[68px] rounded-full bg-gradient-to-tr from-amber-400 via-rose-500 to-fuchsia-600 p-[2px] transition-transform group-hover:scale-95">
+                    <div className="w-full h-full rounded-full bg-slate-900 border-[2.5px] border-slate-950 flex items-center justify-center">
+                      <span className="text-2xl text-white font-black">{story.author.nickname[0]?.toUpperCase() || 'D'}</span>
+                    </div>
+                  </div>
+                  <span className="text-[11px] text-slate-200 truncate w-[72px] text-center mt-1">{story.author.nickname}</span>
                 </div>
-              )}
+              ))}
             </div>
 
+            {/* Instagram Style Posts */}
             {socialError && (
-              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
-                <p className="text-amber-300 text-xs font-bold uppercase tracking-widest mb-2">Thiết lập</p>
+              <div className="m-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+                <p className="text-amber-300 text-xs font-bold uppercase tracking-widest mb-2">Lỗi tải dữ liệu</p>
                 <p className="text-slate-200 text-sm leading-relaxed">{socialError}</p>
               </div>
             )}
 
             {!socialError && isSocialLoading && (
-              <div className={`${card} p-8 text-center`}>
-                <RefreshCw size={28} className="text-cyan-400 mx-auto mb-4 animate-spin" />
-                <p className="text-white font-semibold">Đang tải feed cộng đồng...</p>
+              <div className="p-12 text-center bg-slate-950">
+                <RefreshCw size={28} className="text-slate-600 mx-auto mb-4 animate-spin" />
               </div>
             )}
 
             {!socialError && !isSocialLoading && socialPosts.length === 0 && (
-              <div className={`${card} p-6 text-center`}>
-                <Rss size={34} className="text-cyan-400 mx-auto mb-4" />
-                <p className="text-white text-lg font-black mb-2">Feed của bạn còn rất mới</p>
-                <div className="flex gap-3">
-                  <button onClick={() => setShowDiscoverPeople(true)} className="flex-1 py-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-sm font-bold active:scale-95 transition-all">
-                    Tìm người để follow
-                  </button>
-                  <button onClick={() => openSocialComposer('progress')} className="flex-1 py-3 rounded-xl bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-sm font-bold active:scale-95 transition-all">
-                    Đăng progress
-                  </button>
+              <div className="p-8 text-center bg-slate-950 mt-10">
+                <div className="w-24 h-24 rounded-full border-2 border-slate-800 flex items-center justify-center mx-auto mb-5">
+                  <Heart size={36} className="text-slate-700" />
                 </div>
+                <p className="text-white text-xl font-bold mb-2">Khám phá cộng đồng</p>
+                <p className="text-slate-400 text-[15px] mb-8">Theo dõi bạn bè để xem cập nhật của họ.</p>
+                <button onClick={() => setShowDiscoverPeople(true)} className="px-6 py-2.5 rounded-xl bg-blue-500 text-white font-semibold active:scale-95 transition-transform text-[15px]">
+                  Tìm người theo dõi
+                </button>
               </div>
             )}
 
-            {!socialError && !isSocialLoading && socialPosts.length > 0 && socialPosts.map(post => (
-              <div key={post.id} className={`${card} p-5`}>
-                <div className="flex items-start gap-3">
-                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 shadow-inner" style={{ background: post.post_kind === 'progress' ? 'linear-gradient(135deg, rgba(34,211,238,0.35), rgba(59,130,246,0.35))' : 'linear-gradient(135deg, rgba(16,185,129,0.35), rgba(6,182,212,0.25))' }}>
-                    <span className="text-lg font-black text-white">{post.author.nickname[0]?.toUpperCase() || 'D'}</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-white font-black truncate">{post.author.nickname}</p>
-                        <div className="flex items-center gap-2 mt-1 flex-wrap">
-                          <span className={`px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider border ${post.post_kind === 'progress' ? 'bg-cyan-500/10 text-cyan-300 border-cyan-500/20' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'}`}>
-                            {post.post_kind === 'progress' ? 'Tiến độ' : 'Bài viết'}
-                          </span>
-                          <span className="text-slate-500 text-[10px] uppercase tracking-wider">{post.visibility === 'followers' ? 'Chỉ follower' : 'Công khai'}</span>
+            <div className="divide-y divide-slate-800/80 bg-slate-950">
+              {!socialError && !isSocialLoading && socialPosts.map(post => (
+                <div key={post.id} className="pb-5 pt-3">
+                  {/* Post Header */}
+                  <div className="flex items-center justify-between px-3 py-2.5">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-emerald-400 to-cyan-500 p-[1.5px]">
+                        <div className="w-full h-full rounded-full bg-slate-900 border border-slate-950 flex items-center justify-center">
+                          <span className="text-white font-bold text-[10px]">{post.author.nickname[0]?.toUpperCase() || 'U'}</span>
                         </div>
                       </div>
-                      <p className="text-slate-500 text-[10px] uppercase tracking-wider flex-shrink-0">{getRelativeTimeLabel(post.created_at)}</p>
+                      <span className="text-[14px] font-semibold text-white">{post.author.nickname}</span>
                     </div>
-
-                    {post.content && (
-                      <p className="text-slate-300 text-sm leading-relaxed mt-4 whitespace-pre-wrap">{post.content}</p>
-                    )}
-
-                    {post.image_url && (
-                      <div className="mt-4 overflow-hidden rounded-2xl border border-slate-700/70 bg-slate-900">
-                        <img src={post.image_url} alt={`Bài đăng của ${post.author.nickname}`} className="w-full h-56 object-cover" />
-                      </div>
-                    )}
-
-                    <div className="mt-4 flex items-center gap-2 flex-wrap">
-                      <div className="px-3 py-2 rounded-xl bg-slate-900/70 border border-slate-700 text-[11px] text-cyan-300 font-semibold">
-                        {post.hydration_ml || 0}ml hôm nay
-                      </div>
-                      <div className="px-3 py-2 rounded-xl bg-slate-900/70 border border-slate-700 text-[11px] text-orange-300 font-semibold">
-                        Streak {post.streak_snapshot || 0} ngày
-                      </div>
-                      {post.author.id !== profile?.id && socialFollowingIds.includes(post.author.id) && (
-                        <div className="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-300 font-semibold">
-                          Đang theo dõi
+                    <div className="relative">
+                      <MoreHorizontal size={20} className="text-white cursor-pointer hover:opacity-70" onClick={() => setActivePostActionMenu(activePostActionMenu === post.id ? null : post.id)} />
+                      {activePostActionMenu === post.id && (
+                        <div className="absolute top-6 right-0 w-40 bg-slate-800 border border-slate-700 rounded-xl shadow-xl z-50 overflow-hidden">
+                          {profile?.id === post.author.id ? (
+                            <>
+                              <button onClick={() => startEditSocialPost(post)} className="w-full text-left px-4 py-2.5 text-sm text-white hover:bg-slate-700 transition-colors">Chỉnh sửa</button>
+                              <button onClick={() => handleDeleteSocialPost(post.id)} className="w-full text-left px-4 py-2.5 text-sm text-red-400 hover:bg-slate-700 transition-colors border-t border-slate-700">Xóa bài viết</button>
+                            </>
+                          ) : (
+                            <button onClick={() => { setReportingPostId(post.id); setActivePostActionMenu(null); }} className="w-full text-left px-4 py-2.5 text-sm text-amber-400 hover:bg-slate-700 transition-colors flex items-center gap-2">
+                              <span>🚩</span> Báo cáo vi phạm
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
+                  </div>
+                  
+                  {/* Media Content */}
+                  {post.image_url ? (
+                    <div className="w-full aspect-square bg-slate-900 mt-1">
+                       <img src={post.image_url} alt="Post" className="w-full h-full object-cover" />
+                    </div>
+                  ) : (
+                    <div className="w-full aspect-square flex flex-col items-center justify-center p-6 text-center shadow-inner relative overflow-hidden mt-1" style={{ background: post.post_kind === 'progress' ? 'linear-gradient(135deg, #0284c7, #3b82f6)' : 'linear-gradient(135deg, #059669, #0891b2)' }}>
+                       <div className="absolute -top-20 -left-20 w-64 h-64 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
+                       <div className="absolute -bottom-20 -right-20 w-64 h-64 bg-cyan-300/10 rounded-full blur-3xl pointer-events-none"></div>
+                       <span className="text-white text-6xl font-black mb-3 z-10 drop-shadow-md">{post.hydration_ml || 0}ml</span>
+                       <span className="text-white/95 text-[22px] font-bold leading-tight z-10 max-w-[80%] drop-shadow line-clamp-3 overflow-hidden" style={{ display: '-webkit-box', WebkitBoxOrient: 'vertical', wordBreak: 'break-word' }}>{post.content || (post.post_kind === 'progress' ? 'Đã hoàn thành mục tiêu nước!' : '')}</span>
+                    </div>
+                  )}
 
-                    <div className="mt-4 grid grid-cols-3 gap-2">
-                      <button onClick={() => handleToggleLikePost(post)} className={`py-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all ${post.likedByMe ? 'bg-rose-500/15 text-rose-300 border-rose-500/30' : 'bg-slate-900/70 text-slate-300 border-slate-700'}`}>
-                        <Heart size={14} className={post.likedByMe ? 'fill-rose-400' : ''} />
-                        {post.like_count || 0} thích
+                  {/* Actions Bar */}
+                  <div className="flex items-center justify-between px-3 pt-3 pb-2">
+                    <div className="flex items-center gap-4">
+                      <button onClick={() => handleToggleLikePost(post)}>
+                        <Heart size={26} className={`transition-all ${post.likedByMe ? 'fill-rose-500 text-rose-500 scale-[1.15]' : 'text-white hover:text-slate-300'}`} />
                       </button>
-                      <button onClick={() => setExpandedPostId(expandedPostId === post.id ? null : post.id)} className={`py-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all ${expandedPostId === post.id ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' : 'bg-slate-900/70 text-slate-300 border-slate-700'}`}>
-                        💬
+                      <button onClick={() => setExpandedPostId(expandedPostId === post.id ? null : post.id)}>
+                         <MessageCircle size={26} className="text-white hover:text-slate-300 transition-colors" style={{ transform: 'scaleX(-1)' }} />
                       </button>
-                      <button onClick={() => openSocialComposer('progress')} className="py-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all">
-                        <Share2 size={14} />
+                      <button onClick={() => openSocialComposer('progress')}>
+                         <Send size={24} className="text-white hover:text-slate-300 transition-colors origin-center -rotate-12" />
                       </button>
                     </div>
-                    {expandedPostId === post.id && profile?.id && (
-                      <CommentsSection postId={post.id} currentUserId={profile.id} />
+                    <Bookmark size={25} className="text-white hover:text-slate-300 transition-colors" />
+                  </div>
+
+                  {/* Likes & Caption */}
+                  <div className="px-3">
+                    <p className="text-white text-[14px] font-semibold mb-1 opacity-90">{post.like_count || 0} lượt thích</p>
+                    
+                    {post.image_url && post.content && (
+                       <p className="text-slate-100 text-[14px] leading-snug">
+                         <span className="font-semibold mr-1.5 text-white">{post.author.nickname}</span>
+                         {post.content}
+                       </p>
                     )}
+                    
+                    {!post.image_url && (
+                       <p className="text-slate-100 text-[14px] leading-snug">
+                         <span className="font-semibold mr-1.5 text-white">{post.author.nickname}</span>
+                         Đang có streak <span className="font-bold text-amber-400">{post.streak_snapshot || 0} ngày</span> liên tiếp! 🔥 Hãy cùng nhau cố gắng!
+                       </p>
+                    )}
+                    
+                    {/* View all comments prompt */}
+                    <button className="text-slate-500 text-[14px] mt-1.5 active:opacity-70 transition-opacity font-medium" onClick={() => setExpandedPostId(expandedPostId === post.id ? null : post.id)}>
+                      Xem tất cả bình luận
+                    </button>
+                    
+                    <p className="text-slate-500 text-[11px] mt-1.5 uppercase tracking-wide font-medium">{getRelativeTimeLabel(post.created_at)}</p>
                   </div>
-                </div>
-              </div>
-            ))}
 
-            <div className="space-y-3">
-              {[
-                { icon: Zap, color: '#fbbf24', bg: 'rgba(251,191,36,0.15)', border: 'rgba(251,191,36,0.3)', title: 'Giao thức buổi sáng', body: 'Sau khi ngủ dậy, hãy ưu tiên 250-300ml nước trước cà phê để kéo hydration level về trạng thái ổn định.' },
-                { icon: Target, color: '#22d3ee', bg: 'rgba(6,182,212,0.15)', border: 'rgba(6,182,212,0.3)', title: 'Thử thách 7 ngày', body: 'Theo dõi vài người bạn thân và cùng nhau hoàn thành 100% mục tiêu nước trong 7 ngày liên tiếp.' },
-              ].map(({ icon: Icon, color, bg, border, title, body }) => (
-                <div key={title} className={`${card} p-4`} style={{ borderColor: border }}>
-                  <div className="flex items-start gap-4">
-                    <div className="w-11 h-11 rounded-2xl flex items-center justify-center flex-shrink-0" style={{ background: bg, border: `1px solid ${border}` }}>
-                      <Icon size={18} style={{ color }} />
+                  {/* Comments Section */}
+                  {expandedPostId === post.id && profile?.id && (
+                    <div className="px-3 mt-3 border-t border-slate-800/60 pt-3">
+                       <CommentsSection postId={post.id} currentUserId={profile.id} />
                     </div>
-                    <div className="flex-1">
-                      <p className="text-white font-bold text-sm mb-1">{title}</p>
-                      <p className="text-slate-400 text-xs leading-relaxed">{body}</p>
-                    </div>
-                  </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -2591,30 +2498,34 @@ ${historyText}`;
                 </button>
               </div>
               <div className="grid grid-cols-3 gap-3">
-                <div className="flex flex-col items-center justify-center p-3 rounded-2xl bg-slate-900/50 border border-cyan-500/20 relative overflow-hidden">
+                <div className={`flex flex-col items-center justify-center p-3 rounded-2xl bg-slate-900/50 border border-cyan-500/20 relative overflow-hidden transition-all duration-500 ${streak >= 7 ? '' : 'opacity-50 grayscale'}`}>
                   <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 to-transparent"></div>
                   <div className="w-10 h-10 rounded-full bg-cyan-500/20 border border-cyan-500/30 flex items-center justify-center mb-2 relative z-10">
                     <Medal size={20} className="text-cyan-400" />
                   </div>
                   <p className="text-white text-[10px] font-bold text-center relative z-10">Kỷ luật thép</p>
                   <p className="text-cyan-400 text-[9px] mt-0.5 relative z-10">7 ngày Streak</p>
+                  {streak < 7 && <Lock size={12} className="absolute top-2 right-2 text-cyan-400/50" />}
                 </div>
                 
-                <div className="flex flex-col items-center justify-center p-3 rounded-2xl bg-slate-900/50 border border-orange-500/20 relative overflow-hidden">
+                <div className={`flex flex-col items-center justify-center p-3 rounded-2xl bg-slate-900/50 border border-orange-500/20 relative overflow-hidden transition-all duration-500 ${progress >= 100 ? '' : 'opacity-50 grayscale'}`}>
                   <div className="absolute inset-0 bg-gradient-to-br from-orange-500/10 to-transparent"></div>
                   <div className="w-10 h-10 rounded-full bg-orange-500/20 border border-orange-500/30 flex items-center justify-center mb-2 relative z-10">
                     <Flame size={20} className="text-orange-400" />
                   </div>
                   <p className="text-white text-[10px] font-bold text-center relative z-10">Chiến thần</p>
                   <p className="text-orange-400 text-[9px] mt-0.5 relative z-10">Hoàn thành 100%</p>
+                  {progress < 100 && <Lock size={12} className="absolute top-2 right-2 text-orange-400/50" />}
                 </div>
                 
-                <div className="flex flex-col items-center justify-center p-3 rounded-2xl bg-slate-900/50 border border-emerald-500/20 relative overflow-hidden opacity-50 grayscale">
-                  <div className="w-10 h-10 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center mb-2">
+                <div className={`flex flex-col items-center justify-center p-3 rounded-2xl bg-slate-900/50 border ${streak >= 30 ? 'border-emerald-500/50 shadow-[0_0_15px_rgba(16,185,129,0.3)]' : 'border-emerald-500/20 opacity-50 grayscale'} relative overflow-hidden transition-all duration-500`}>
+                  <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/10 to-transparent"></div>
+                  <div className={`w-10 h-10 rounded-full ${streak >= 30 ? 'bg-emerald-500/40 border-emerald-400' : 'bg-emerald-500/20 border-emerald-500/30'} border flex items-center justify-center mb-2 relative z-10`}>
                     <Bike size={20} className="text-emerald-400" />
                   </div>
-                  <p className="text-white text-[10px] font-bold text-center">Vận động viên</p>
-                  <p className="text-emerald-400 text-[9px] mt-0.5 flex items-center justify-center gap-0.5"><Lock size={8}/> Chưa mở</p>
+                  <p className="text-white text-[10px] font-bold text-center relative z-10">Huyền thoại</p>
+                  <p className="text-emerald-400 text-[9px] mt-0.5 relative z-10">30 ngày Streak</p>
+                  {streak < 30 && <Lock size={12} className="absolute top-2 right-2 text-emerald-400/50" />}
                 </div>
               </div>
             </div>
@@ -2648,92 +2559,24 @@ ${historyText}`;
       </div>
 
       {/* ===== HISTORY MODAL ===== */}
-      {showHistory && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }} onClick={() => setShowHistory(false)}>
-          <div className="w-full max-w-md rounded-t-3xl p-6 pb-10" style={{ background: '#1e293b', border: '1px solid rgba(6,182,212,0.2)' }} onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <p className="text-cyan-400 text-[10px] font-bold uppercase tracking-widest">Hôm nay</p>
-                <h3 className="text-xl font-black text-white">Lịch sử uống nước</h3>
-              </div>
-              <button onClick={() => setShowHistory(false)} className="text-slate-400 text-xs bg-slate-700 px-3 py-1.5 rounded-lg font-bold">Đóng</button>
-            </div>
-
-            {waterEntries.length === 0 ? (
-              <div className="text-center py-10">
-                <Droplet size={36} className="text-slate-600 mx-auto mb-3" />
-                <p className="text-slate-400 text-sm">Chưa có ghi nhận nào hôm nay</p>
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-96 overflow-y-auto">
-                {[...waterEntries].reverse().map((entry) => {
-                  const t = new Date(entry.timestamp);
-                  const timeStr = new Intl.DateTimeFormat('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(t);
-                  return (
-                    <div key={entry.id} className="flex items-center gap-3 p-3 rounded-xl" style={{ background: 'rgba(6,182,212,0.06)', border: '1px solid rgba(6,182,212,0.12)' }}>
-                      <div className="w-9 h-9 rounded-xl bg-cyan-500/20 flex items-center justify-center flex-shrink-0">
-                    <Cpu size={16} className="text-cyan-400" />
-                      </div>
-                      <div className="flex-1">
-                        <p className={`font-bold text-sm ${(entry.actual_ml !== undefined && entry.actual_ml < 0) ? 'text-red-400' : 'text-white'}`}>
-                          {(entry.actual_ml !== undefined && entry.actual_ml < 0) ? '' : '+'}{entry.actual_ml || entry.amount} ml
-                        </p>
-                        <p className="text-slate-400 text-[10px] line-clamp-1 truncate pr-2">
-                          {timeStr} · {entry.name || 'Nước lọc'}
-                        </p>
-                      </div>
-                      <button onClick={() => { setEditingEntry(entry); setEditAmount(entry.amount.toString()); setShowHistory(false); }}
-                        className="px-3 py-1.5 rounded-lg text-[10px] font-bold text-cyan-400 border border-cyan-500/30 bg-cyan-500/10 mr-1">
-                        Sửa
-                      </button>
-                      <button onClick={() => handleDeleteEntry(entry.id)}
-                        className="px-3 py-1.5 rounded-lg text-[10px] font-bold text-red-400 border border-red-500/30 bg-red-500/10">
-                        Xóa
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            <div className="mt-4 pt-4 border-t border-slate-700 flex justify-between items-center">
-              <p className="text-slate-400 text-xs">{waterEntries.length} lần · Tổng cộng</p>
-              <p className="text-cyan-400 font-black">{waterIntake} ml</p>
-            </div>
-          </div>
-        </div>
-      )}
+      <HistoryModal
+        showHistory={showHistory}
+        setShowHistory={setShowHistory}
+        waterEntries={waterEntries}
+        waterIntake={waterIntake}
+        setEditingEntry={setEditingEntry}
+        setEditAmount={setEditAmount}
+        handleDeleteEntry={handleDeleteEntry}
+      />
 
       {/* ===== EDIT MODAL ===== */}
-      {editingEntry && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-6" style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }} onClick={() => { setEditingEntry(null); setEditAmount(''); }}>
-          <div className="w-full max-w-sm rounded-3xl p-6" style={{ background: '#1e293b', border: '1px solid rgba(6,182,212,0.2)' }} onClick={e => e.stopPropagation()}>
-            <p className="text-cyan-400 text-[10px] font-bold uppercase tracking-widest mb-1">Chỉnh sửa</p>
-            <h3 className="text-xl font-black text-white mb-5">Cập nhật ghi nhận</h3>
-            <div className="mb-4">
-              <label className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2 block">Lượng nước (ml)</label>
-              <input
-                type="number"
-                value={editAmount}
-                onChange={e => setEditAmount(e.target.value)}
-                className="w-full p-4 rounded-xl bg-slate-900 border border-slate-700 text-white text-lg font-bold outline-none focus:border-cyan-500"
-                autoFocus
-              />
-            </div>
-            <div className="flex gap-3">
-              <button onClick={() => { setEditingEntry(null); setEditAmount(''); }}
-                className="flex-1 py-3 rounded-xl text-slate-400 font-bold text-sm border border-slate-700 bg-slate-800">
-                Huỷ
-              </button>
-              <button onClick={handleEditEntry}
-                className="flex-1 py-3 rounded-xl font-bold text-slate-900 text-sm"
-                style={{ background: 'linear-gradient(135deg, #06b6d4, #0ea5e9)' }}>
-                Lưu thay đổi
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <EditEntryModal
+        editingEntry={editingEntry}
+        setEditingEntry={setEditingEntry}
+        editAmount={editAmount}
+        setEditAmount={setEditAmount}
+        handleEditEntry={handleEditEntry}
+      />
 
       {/* ===== SMART HUB MODAL (Gom các tính năng phụ) ===== */}
       {showSmartHub && (
@@ -2981,43 +2824,13 @@ ${historyText}`;
       )}
 
       {/* ===== CUSTOM DRINK MODAL ===== */}
-      {showCustomDrink && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-6" style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }} onClick={() => setShowCustomDrink(false)}>
-          <div className="w-full max-w-sm rounded-3xl p-6" style={{ background: '#1e293b', border: '1px solid rgba(6,182,212,0.2)' }} onClick={e => e.stopPropagation()}>
-            <h3 className="text-xl font-black text-white mb-5">Thêm đồ uống khác</h3>
-
-            <div className="space-y-4 mb-6">
-              <div>
-                <label className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2 block">Tên đồ uống</label>
-                <input type="text" value={customDrinkForm.name} onChange={e => setCustomDrinkForm({...customDrinkForm, name: e.target.value})} className="w-full p-3.5 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-cyan-500" placeholder="VD: Trà đào, Nước dừa..." />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2 block">Dung tích (ml)</label>
-                <input type="number" value={customDrinkForm.amount} onChange={e => setCustomDrinkForm({...customDrinkForm, amount: e.target.value})} className="w-full p-3.5 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-cyan-500" />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2 block">Nhóm chất lỏng (BHI)</label>
-                <select value={customDrinkForm.factor} onChange={e => setCustomDrinkForm({...customDrinkForm, factor: Number(e.target.value)})} className="w-full p-3.5 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-cyan-500">
-                  <option value={1.0}>Nước lọc / Nước trái cây (100%)</option>
-                  <option value={1.1}>Nước bù khoáng / Sữa (110%)</option>
-                  <option value={0.8}>Cà phê / Trà đậm (80%)</option>
-                  <option value={-0.5}>Rượu / Bia / Cồn (-50%)</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <button onClick={() => setShowCustomDrink(false)} className="flex-1 py-3 rounded-xl text-slate-400 font-bold text-sm border border-slate-700 bg-slate-800">Huỷ</button>
-              <button onClick={() => {
-                const amt = Number(customDrinkForm.amount) || 0;
-                if (amt <= 0) return toast.error("Dung tích không hợp lệ!");
-                handleAddWater(amt, customDrinkForm.factor, customDrinkForm.name || 'Đồ uống tùy chỉnh');
-                setShowCustomDrink(false);
-              }} className="flex-1 py-3 rounded-xl font-bold text-slate-900 text-sm" style={{ background: 'linear-gradient(135deg, #06b6d4, #0ea5e9)' }}>Thêm ngay</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <CustomDrinkModal
+        showCustomDrink={showCustomDrink}
+        setShowCustomDrink={setShowCustomDrink}
+        customDrinkForm={customDrinkForm}
+        setCustomDrinkForm={setCustomDrinkForm}
+        handleAddWater={handleAddWater}
+      />
 
       {/* ===== PRESET MANAGER MODAL ===== */}
       {showPresetManager && (
@@ -3065,42 +2878,13 @@ ${historyText}`;
       )}
 
       {/* ===== ONBOARDING MODAL (HƯỚNG DẪN TÂN THỦ) ===== */}
-      {showOnboarding && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center px-6 bg-slate-900/90 backdrop-blur-md">
-          <div className="w-full max-w-sm rounded-[2rem] p-8 text-center relative overflow-hidden shadow-[0_0_50px_rgba(6,182,212,0.15)]" style={{ background: 'linear-gradient(160deg, #1e293b 0%, #0f172a 100%)', border: '1px solid rgba(6,182,212,0.3)' }}>
-            <div className="absolute -top-10 -right-10 w-32 h-32 bg-cyan-500/20 rounded-full blur-2xl"></div>
-            
-            {onboardingStep === 1 && (
-              <div className="animate-in fade-in zoom-in duration-500">
-                <div className="w-20 h-20 mx-auto bg-cyan-500/20 border-2 border-cyan-500/50 rounded-3xl flex items-center justify-center mb-6 shadow-[0_0_20px_rgba(6,182,212,0.4)]">
-                  <span className="text-4xl font-black text-white">(^o^)</span>
-                </div>
-                <h3 className="text-2xl font-black text-white mb-3">Holo-Pet</h3>
-                <p className="text-slate-400 text-sm leading-relaxed mb-8">Nhắc bạn uống nước mỗi ngày.</p>
-              </div>
-            )}
-            {onboardingStep === 2 && (
-              <div className="animate-in fade-in slide-in-from-right duration-500">
-                <div className="w-20 h-20 mx-auto bg-orange-500/20 border-2 border-orange-500/50 rounded-3xl flex items-center justify-center mb-6"><Coffee size={32} className="text-orange-400" /></div>
-                <h3 className="text-2xl font-black text-white mb-3">Đồ uống</h3>
-                <p className="text-slate-400 text-sm leading-relaxed mb-8">Mỗi loại đồ uống có hệ số khác nhau.</p>
-              </div>
-            )}
-            {onboardingStep === 3 && (
-              <div className="animate-in fade-in slide-in-from-right duration-500">
-                <div className="w-20 h-20 mx-auto bg-emerald-500/20 border-2 border-emerald-500/50 rounded-3xl flex items-center justify-center mb-6"><Sparkles size={32} className="text-emerald-400" /></div>
-                <h3 className="text-2xl font-black text-white mb-3">Tiện ích</h3>
-                <p className="text-slate-400 text-sm leading-relaxed mb-8">Mở góc phải màn hình để xem kết nối và lời nhắc.</p>
-              </div>
-            )}
-
-            <button onClick={() => { if (onboardingStep < 3) setOnboardingStep(onboardingStep + 1); else { localStorage.setItem(`digiwell_onboarded_${profile?.id}`, 'true'); setShowOnboarding(false); toast.success("Đã hoàn tất thiết lập!"); } }} className="w-full py-4 rounded-xl font-bold text-slate-900 text-sm active:scale-95 transition-all shadow-lg" style={{ background: 'linear-gradient(135deg, #06b6d4, #0ea5e9)' }}>
-              {onboardingStep < 3 ? 'Tiếp tục' : 'Bắt đầu'}
-            </button>
-            <div className="flex justify-center gap-2 mt-6">{[1, 2, 3].map(i => (<div key={i} className={`w-2 h-2 rounded-full transition-all duration-300 ${onboardingStep === i ? 'bg-cyan-400 w-6' : 'bg-slate-700'}`} />))}</div>
-          </div>
-        </div>
-      )}
+      <OnboardingModal
+        showOnboarding={showOnboarding}
+        setShowOnboarding={setShowOnboarding}
+        onboardingStep={onboardingStep}
+        setOnboardingStep={setOnboardingStep}
+        profileId={profile?.id}
+      />
 
       {/* ===== SOCIAL PROFILE PAGE ===== */}
       {showSocialProfile && (
@@ -3413,51 +3197,17 @@ ${historyText}`;
       )}
 
       {/* ===== ADD FRIEND MODAL ===== */}
-      {showAddFriend && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-6" style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }} onClick={() => { setShowAddFriend(false); setSearchQuery(''); setSearchResults([]); }}>
-          <div className="w-full max-w-sm rounded-3xl p-6" style={{ background: '#1e293b', border: '1px solid rgba(16,185,129,0.3)' }} onClick={e => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-5">
-              <div>
-                <h3 className="text-xl font-black text-white">Thêm bạn bè</h3>
-              </div>
-              <button onClick={() => { setShowAddFriend(false); setSearchQuery(''); setSearchResults([]); }} className="text-slate-400 hover:text-white">✕</button>
-            </div>
-            
-            <div className="relative mb-6">
-              <input type="text" value={searchQuery} onChange={e => handleSearchUser(e.target.value)} placeholder="Nhập nickname cần tìm..." className="w-full p-3.5 pl-10 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-emerald-500" />
-              <Search size={16} className="absolute left-3.5 top-4 text-slate-500" />
-            </div>
-
-            {isSearching ? (
-              <p className="text-center text-slate-400 text-sm py-4">Đang tìm kiếm...</p>
-            ) : searchResults.length > 0 ? (
-              <div className="space-y-3 mb-6">
-                {searchResults.map(user => (
-                  <div key={user.id} className="flex items-center justify-between p-3 rounded-xl bg-slate-800 border border-slate-700">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-white shadow-inner" style={{ background: 'linear-gradient(135deg, #10b981, #059669)' }}>
-                        {user.nickname.charAt(0).toUpperCase()}
-                      </div>
-                      <div>
-                        <p className="text-white text-sm font-bold">{user.nickname}</p>
-                        <p className="text-slate-400 text-[10px]">Người dùng DigiWell</p>
-                      </div>
-                    </div>
-                    <button onClick={() => handleAddFriend(user.id, user.nickname)} className="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-xs font-bold active:scale-95 transition-all">
-                      Kết bạn
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-center py-6">
-                <Users size={32} className="text-slate-600 mx-auto mb-3" />
-                <p className="text-slate-400 text-sm">{searchQuery.length > 2 ? 'Không tìm thấy người dùng này' : 'Tìm kiếm bằng nickname để cùng đua top'}</p>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      <AddFriendModal
+        showAddFriend={showAddFriend}
+        setShowAddFriend={setShowAddFriend}
+        searchQuery={searchQuery}
+        handleSearchUser={handleSearchUser}
+        isSearching={isSearching}
+        searchResults={searchResults}
+        handleAddFriend={handleAddFriend}
+        setSearchQuery={setSearchQuery}
+        setSearchResults={setSearchResults}
+      />
 
       {/* ===== PROFILE SETTINGS PAGE ===== */}
       {showProfileSettings && (
@@ -3561,151 +3311,206 @@ ${historyText}`;
       )}
 
       {/* ===== EDIT PROFILE MODAL ===== */}
-      {showEditProfile && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-6" style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)' }} onClick={() => setShowEditProfile(false)}>
-          <div className="w-full max-w-sm rounded-3xl p-6 max-h-[85vh] overflow-y-auto scrollbar-hide" style={{ background: '#1e293b', border: '1px solid rgba(6,182,212,0.2)' }} onClick={e => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-5">
-              <div>
-                <h3 className="text-xl font-black text-white">Chỉnh sửa thông tin</h3>
-              </div>
-              <button onClick={() => setShowEditProfile(false)} className="text-slate-400 hover:text-white">✕</button>
-            </div>
-
-            <form onSubmit={handleSaveProfile} className="space-y-4">
-              <div>
-                <label className="text-[10px] text-slate-400 font-semibold uppercase mb-1 block">Nickname hiển thị</label>
-                <input type="text" value={editProfileData.nickname} onChange={e => setEditProfileData({...editProfileData, nickname: e.target.value})} className="w-full p-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-cyan-500" required />
-              </div>
-              
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="text-[10px] text-slate-400 font-semibold uppercase mb-1 block">Giới tính</label><select value={editProfileData.gender} onChange={e => setEditProfileData({...editProfileData, gender: e.target.value})} className="w-full p-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-cyan-500"><option>Nam</option><option>Nữ</option><option>Khác</option></select></div>
-                <div><label className="text-[10px] text-slate-400 font-semibold uppercase mb-1 block">Tuổi</label><input type="number" value={editProfileData.age} onChange={e => setEditProfileData({...editProfileData, age: +e.target.value})} className="w-full p-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-cyan-500" required /></div>
-                <div><label className="text-[10px] text-slate-400 font-semibold uppercase mb-1 block">Chiều cao (cm)</label><input type="number" value={editProfileData.height} onChange={e => setEditProfileData({...editProfileData, height: +e.target.value})} className="w-full p-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-cyan-500" required /></div>
-                <div><label className="text-[10px] text-slate-400 font-semibold uppercase mb-1 block">Cân nặng (kg)</label><input type="number" value={editProfileData.weight} onChange={e => setEditProfileData({...editProfileData, weight: +e.target.value})} className="w-full p-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-cyan-500" required /></div>
-              </div>
-
-              <div>
-                <label className="text-[10px] text-slate-400 font-semibold uppercase mb-1 block">Mục tiêu chính</label>
-                <select value={editProfileData.goal} onChange={e => setEditProfileData({...editProfileData, goal: e.target.value})} className="w-full p-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm outline-none focus:border-cyan-500">
-                  <option value="Giảm mỡ & Tăng cơ">Giảm mỡ & Tăng cơ</option><option value="Sức khỏe tổng quát">Sức khỏe tổng quát</option><option value="Bảo vệ da">Bảo vệ da</option>
-                </select>
-              </div>
-
-              <button type="submit" disabled={isUpdatingProfile} className="w-full py-4 mt-2 rounded-xl font-bold text-slate-900 text-sm disabled:opacity-50 active:scale-95 transition-all" style={{ background: 'linear-gradient(135deg, #06b6d4, #0ea5e9)' }}>
-                {isUpdatingProfile ? "Đang lưu..." : "Lưu thay đổi"}
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
+      <EditProfileModal
+        showEditProfile={showEditProfile}
+        setShowEditProfile={setShowEditProfile}
+        editProfileData={editProfileData}
+        setEditProfileData={setEditProfileData}
+        handleSaveProfile={handleSaveProfile}
+        isUpdatingProfile={isUpdatingProfile}
+      />
 
       {/* ===== PREMIUM PAYWALL MODAL ===== */}
-      {showPremiumModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center px-6 bg-slate-900/90 backdrop-blur-md" onClick={() => setShowPremiumModal(false)}>
-          <div className="w-full max-w-sm rounded-[2rem] p-8 relative overflow-hidden shadow-[0_0_50px_rgba(245,158,11,0.15)]" style={{ background: 'linear-gradient(160deg, #1e293b 0%, #0f172a 100%)', border: '1px solid rgba(245,158,11,0.3)' }} onClick={e => e.stopPropagation()}>
-            <div className="absolute -top-10 -right-10 w-32 h-32 bg-amber-500/20 rounded-full blur-2xl pointer-events-none"></div>
-            
-            <div className="w-16 h-16 bg-amber-500/20 border border-amber-500/50 rounded-2xl flex items-center justify-center mb-6 shadow-[0_0_20px_rgba(245,158,11,0.4)]">
-              <Sparkles size={28} className="text-amber-400" />
-            </div>
-            
-            <h3 className="text-2xl font-black text-white mb-2">DigiWell <span className="text-transparent bg-clip-text bg-gradient-to-r from-amber-400 to-amber-600">PRO</span></h3>
-            <p className="text-slate-400 text-sm leading-relaxed mb-6">Nâng cấp để mở khóa toàn bộ tính năng thông minh.</p>
-            
-            <ul className="space-y-3 mb-8">
-              {[
-                'Xuất báo cáo PDF chuẩn Y khoa',
-                'Chế độ Nhịn ăn gián đoạn (Fasting)',
-                'AI Analytics chuyên sâu phân tích thói quen',
-              ].map((ft, i) => (
-                <li key={i} className="flex items-center gap-3 text-sm text-slate-300">
-                  <div className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center flex-shrink-0">
-                    <Target size={12} className="text-amber-400" />
-                  </div>
-                  {ft}
-                </li>
-              ))}
-            </ul>
-
-            <button onClick={() => { setIsPremium(true); setShowPremiumModal(false); toast.success("Chào mừng bạn đến với DigiWell PRO! 🌟"); }} className="w-full py-4 rounded-xl font-bold text-slate-900 text-sm active:scale-95 transition-all shadow-lg" style={{ background: 'linear-gradient(135deg, #fbbf24, #d97706)' }}>
-              Nâng cấp ngay - 49.000đ/tháng
-            </button>
-            <button onClick={() => setShowPremiumModal(false)} className="w-full mt-3 py-3 rounded-xl text-slate-400 text-xs font-bold hover:bg-slate-800 transition-colors">
-              Để sau
-            </button>
-          </div>
-        </div>
-      )}
+      <PremiumModal
+        showPremiumModal={showPremiumModal}
+        setShowPremiumModal={setShowPremiumModal}
+        setIsPremium={setIsPremium}
+      />
 
       {/* ===== AI CHAT MODAL (PREMIUM) ===== */}
-      {showAiChat && (
-        <div className="fixed inset-0 z-[100] flex flex-col bg-slate-950">
-          <div className="flex items-center justify-between px-5 pt-8 pb-4 border-b border-slate-800 bg-slate-900/80 backdrop-blur-md sticky top-0 z-10">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center shadow-inner">
-                <Bot size={20} className="text-indigo-400" />
+      <AiChatModal
+        showAiChat={showAiChat}
+        setShowAiChat={setShowAiChat}
+        chatMessages={chatMessages}
+        isChatLoading={isChatLoading}
+        chatEndRef={chatEndRef as any}
+        chatInput={chatInput}
+        setChatInput={setChatInput}
+        handleSendChatMessage={handleSendChatMessage}
+      />
+
+      {/* ===== STORY VIEWER (Mobile-Optimized) ===== */}
+      {storyViewerIndex >= 0 && storyViewerIndex < socialStories.length && (() => {
+        const viewingStory = socialStories[storyViewerIndex];
+
+        const goNext = () => {
+          if (storyViewerIndex < socialStories.length - 1) {
+            setStoryViewerIndex(storyViewerIndex + 1);
+            setStoryProgress(0);
+            setStoryPaused(false);
+          } else {
+            setStoryViewerIndex(-1);
+          }
+        };
+        const goPrev = () => {
+          if (storyViewerIndex > 0) {
+            setStoryViewerIndex(storyViewerIndex - 1);
+            setStoryProgress(0);
+            setStoryPaused(false);
+          } else {
+            setStoryProgress(0);
+          }
+        };
+
+        return (
+          <div
+            className="fixed inset-0 z-[95] bg-black flex flex-col select-none"
+            style={{ touchAction: 'none' }}
+          >
+            {/* ── Progress Segments ── */}
+            <div className="flex gap-1 px-3 pt-[env(safe-area-inset-top,12px)] pb-1">
+              {socialStories.map((_, i) => (
+                <div key={i} className="flex-1 h-[3px] rounded-full bg-white/20 overflow-hidden">
+                  <div
+                    className="h-full bg-white rounded-full"
+                    style={{
+                      width: i < storyViewerIndex ? '100%' : i === storyViewerIndex ? `${storyProgress}%` : '0%',
+                      transition: i === storyViewerIndex ? 'width 0.15s linear' : 'none'
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+
+            {/* ── Header ── */}
+            <div className="flex items-center gap-3 px-4 py-2.5">
+              <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-emerald-400 to-cyan-500 p-[1.5px]">
+                <div className="w-full h-full rounded-full bg-black flex items-center justify-center">
+                  <span className="text-white font-bold text-xs">{viewingStory.author.nickname[0]?.toUpperCase() || 'U'}</span>
+                </div>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-white text-[13px] font-semibold truncate">{viewingStory.author.nickname}</p>
+                <p className="text-white/50 text-[10px]">{getRelativeTimeLabel(viewingStory.created_at)}</p>
+              </div>
+              <button
+                onClick={() => setStoryViewerIndex(-1)}
+                className="w-9 h-9 flex items-center justify-center rounded-full bg-white/10 active:bg-white/20"
+              >
+                <span className="text-white text-lg leading-none">✕</span>
+              </button>
+            </div>
+
+            {/* ── Story Content (full screen) ── */}
+            <div className="flex-1 relative overflow-hidden">
+              {viewingStory.image_url ? (
+                <img
+                  src={viewingStory.image_url}
+                  alt="Story"
+                  className="w-full h-full object-cover"
+                  draggable={false}
+                />
+              ) : (
+                <div
+                  className="w-full h-full flex flex-col items-center justify-center p-10 text-center relative"
+                  style={{ background: 'linear-gradient(160deg, #6366f1, #8b5cf6, #d946ef, #f43f5e)' }}
+                >
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.12),transparent_60%)]" />
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_80%_80%,rgba(251,191,36,0.08),transparent_50%)]" />
+                  {viewingStory.hydration_ml ? (
+                    <span className="text-white text-7xl font-black mb-3 z-10 drop-shadow-xl">{viewingStory.hydration_ml}<span className="text-4xl">ml</span></span>
+                  ) : null}
+                  <span className="text-white/95 text-2xl font-bold leading-relaxed z-10 drop-shadow-md max-w-[85%]">{viewingStory.content || '💧'}</span>
+                  {viewingStory.streak_snapshot ? (
+                    <span className="mt-6 px-5 py-2.5 rounded-full bg-white/15 backdrop-blur-sm text-white text-base font-bold z-10 border border-white/10">🔥 Streak {viewingStory.streak_snapshot} ngày</span>
+                  ) : null}
+                </div>
+              )}
+
+              {/* ── Touch Zones: Tap left = prev, Tap right = next, Hold = pause ── */}
+              <div className="absolute inset-0 flex">
+                <div
+                  className="w-1/3 h-full"
+                  onPointerDown={() => setStoryPaused(true)}
+                  onPointerUp={() => { setStoryPaused(false); goPrev(); }}
+                  onPointerLeave={() => setStoryPaused(false)}
+                />
+                <div
+                  className="w-1/3 h-full"
+                  onPointerDown={() => setStoryPaused(true)}
+                  onPointerUp={() => setStoryPaused(false)}
+                  onPointerLeave={() => setStoryPaused(false)}
+                />
+                <div
+                  className="w-1/3 h-full"
+                  onPointerDown={() => setStoryPaused(true)}
+                  onPointerUp={() => { setStoryPaused(false); goNext(); }}
+                  onPointerLeave={() => setStoryPaused(false)}
+                />
+              </div>
+
+              {/* ── Caption overlay (if image + caption) ── */}
+              {viewingStory.image_url && viewingStory.content && (
+                <div className="absolute bottom-0 left-0 right-0 px-5 pb-6 pt-16 bg-gradient-to-t from-black/70 to-transparent">
+                  <p className="text-white text-sm leading-relaxed drop-shadow">
+                    <span className="font-semibold mr-1.5">{viewingStory.author.nickname}</span>
+                    {viewingStory.content}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* ── Bottom safe area ── */}
+            <div style={{ paddingBottom: 'env(safe-area-inset-bottom, 8px)' }} />
+          </div>
+        );
+      })()}
+
+
+      {/* ===== DIGIGUARD: REPORT MODAL ===== */}
+      {reportingPostId && (
+        <div className="fixed inset-0 z-[90] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.7)' }} onClick={() => setReportingPostId(null)}>
+          <div className="w-full max-w-md bg-slate-900 rounded-t-3xl border-t border-slate-700 p-6 pb-10" onClick={e => e.stopPropagation()}>
+            <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-5" />
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-2xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center">
+                <span className="text-lg">🚩</span>
               </div>
               <div>
-                <h3 className="text-white font-black text-lg">DigiWell AI</h3>
-                <p className="text-indigo-400 text-[10px] uppercase tracking-widest font-bold flex items-center gap-1">
-                  <Sparkles size={10} /> Trợ lý Premium
-                </p>
+                <p className="text-white font-black text-base">Báo cáo vi phạm</p>
+                <p className="text-slate-400 text-xs mt-0.5">Giúp DigiGuard giữ gìn cộng đồng sạch</p>
               </div>
             </div>
-            <button onClick={() => setShowAiChat(false)} className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white active:scale-95 transition-all">
-              <X size={18} />
+
+            <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mb-3">Lý do báo cáo</p>
+            <div className="space-y-2 mb-6">
+              {REPORT_REASONS.map(reason => (
+                <button
+                  key={reason}
+                  onClick={() => setReportReason(reason)}
+                  className={`w-full text-left px-4 py-3 rounded-2xl border text-sm font-medium transition-all ${
+                    reportReason === reason
+                      ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                      : 'bg-slate-800/60 border-slate-700 text-slate-300 hover:border-slate-600'
+                  }`}
+                >
+                  {reportReason === reason && <span className="mr-2">✓</span>}
+                  {reason}
+                </button>
+              ))}
+            </div>
+
+            <button
+              onClick={handleReportPost}
+              disabled={isSubmittingReport}
+              className="w-full py-4 rounded-2xl text-sm font-black text-slate-900 disabled:opacity-50 active:scale-95 transition-all"
+              style={{ background: 'linear-gradient(135deg, #f59e0b, #d97706)' }}
+            >
+              {isSubmittingReport ? 'Đang gửi...' : 'Gửi báo cáo'}
             </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-5 space-y-5 scrollbar-hide">
-            {chatMessages.length === 0 && !isChatLoading && (
-              <div className="flex flex-col items-center justify-center h-full opacity-50 space-y-4">
-                <Bot size={48} className="text-indigo-400" />
-                <p className="text-slate-400 text-sm text-center">
-                  Hãy thử: "Ghi nhận giúp tôi 1 ly trà đào 300ml"<br/>hoặc hỏi về chế độ dinh dưỡng.
-                </p>
-              </div>
-            )}
-            {chatMessages.map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                {msg.role !== 'user' && (
-                  <div className="w-8 h-8 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center mr-2 flex-shrink-0 self-end mb-1">
-                    <Bot size={14} className="text-indigo-400" />
-                  </div>
-                )}
-                <div className={`max-w-[75%] p-3.5 rounded-2xl shadow-sm ${msg.role === 'user' ? 'bg-cyan-500 text-slate-900 rounded-br-sm font-medium' : 'bg-slate-800 border border-slate-700 text-slate-200 rounded-bl-sm'}`}>
-                  <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
-                </div>
-              </div>
-            ))}
-            {isChatLoading && (
-              <div className="flex justify-start items-end">
-                <div className="w-8 h-8 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center mr-2 flex-shrink-0 mb-1">
-                  <Bot size={14} className="text-indigo-400" />
-                </div>
-                <div className="max-w-[75%] p-4 rounded-2xl bg-slate-800 border border-slate-700 text-slate-400 rounded-bl-sm flex gap-1.5 items-center h-[46px]">
-                  <div className="w-2 h-2 rounded-full bg-indigo-400/70 animate-bounce" />
-                  <div className="w-2 h-2 rounded-full bg-indigo-400/70 animate-bounce" style={{ animationDelay: '0.15s' }} />
-                  <div className="w-2 h-2 rounded-full bg-indigo-400/70 animate-bounce" style={{ animationDelay: '0.3s' }} />
-                </div>
-              </div>
-            )}
-            <div ref={chatEndRef} className="h-2" />
-          </div>
-
-          <div className="p-4 bg-slate-900/95 border-t border-slate-800 backdrop-blur-xl pb-8">
-            <form onSubmit={handleSendChatMessage} className="flex gap-2">
-              <input 
-                type="text" 
-                value={chatInput} 
-                onChange={(e) => setChatInput(e.target.value)} 
-                placeholder="Hỏi AI hoặc nhờ thêm nước..." 
-                className="flex-1 bg-slate-800/80 border border-slate-700 rounded-full px-5 py-3.5 text-sm text-white outline-none focus:border-cyan-500 shadow-inner" 
-              />
-              <button type="submit" disabled={isChatLoading || !chatInput.trim()} className="w-[50px] h-[50px] rounded-full bg-cyan-500 flex items-center justify-center text-slate-900 disabled:opacity-50 active:scale-95 transition-all shadow-[0_0_15px_rgba(6,182,212,0.3)] flex-shrink-0">
-                <Send size={20} className="ml-1" />
-              </button>
-            </form>
+            <button onClick={() => setReportingPostId(null)} className="w-full py-3 mt-2 text-slate-400 text-sm font-semibold">
+              Hủy
+            </button>
           </div>
         </div>
       )}
