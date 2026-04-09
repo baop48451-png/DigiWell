@@ -654,6 +654,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE social_post_likes;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS trust_score INTEGER DEFAULT 100;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS account_status TEXT DEFAULT 'active'
     CHECK (account_status IN ('active', 'shadowbanned', 'banned'));
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_premium BOOLEAN DEFAULT FALSE;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS premium_until TIMESTAMPTZ;
 
 -- 10. USER PUNISHMENTS (Strike history)
 CREATE TABLE IF NOT EXISTS user_punishments (
@@ -720,3 +722,22 @@ DROP TRIGGER IF EXISTS on_new_report ON social_reports;
 CREATE TRIGGER on_new_report
     AFTER INSERT ON social_reports
     FOR EACH ROW EXECUTE FUNCTION auto_hide_reported_post();
+
+-- 12. SUBSCRIPTIONS (Payment logs)
+CREATE TABLE IF NOT EXISTS public.subscriptions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    gateway TEXT NOT NULL, -- 'stripe', 'payos', 'bank_transfer'
+    amount INTEGER NOT NULL,
+    currency TEXT DEFAULT 'VND',
+    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'failed', 'refunded')),
+    provider_ref TEXT, -- Stripe PaymentIntent ID or PayOS Order ID
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE public.subscriptions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view own subscriptions"
+    ON public.subscriptions FOR SELECT
+    USING (auth.uid() = user_id);

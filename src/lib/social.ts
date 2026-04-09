@@ -30,6 +30,7 @@ export type SocialPostRow = {
   hydration_ml: number | null;
   streak_snapshot: number | null;
   like_count: number | null;
+  comment_count: number | null;
   created_at: string;
   expires_at: string | null;
 };
